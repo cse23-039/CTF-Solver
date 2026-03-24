@@ -88,6 +88,7 @@ let challenges  = [];
 let selectedId  = null;
 let settings    = deepClone(DEFAULTS);
 let startTime   = Date.now();
+let queueState  = { running:false, paused:false, cancelled:false };
 
 const CAT_SHORT = {
   'Binary Exploitation':'pwn','Cryptography':'crypto','Forensics':'forensics',
@@ -102,6 +103,19 @@ function ch(id)   { return challenges.find(c=>c.id===id)??null; }
 function ts() {
   const ms=Date.now()-startTime, s=Math.floor(ms/1000);
   return [Math.floor(s/3600),Math.floor((s%3600)/60),s%60].map(n=>String(n).padStart(2,'0')).join(':');
+}
+function sleep(ms) { return new Promise(r=>setTimeout(r, ms)); }
+function nowStamp() {
+  return new Date().toISOString().replace(/[:.]/g,'-');
+}
+function downloadTextFile(filename, content, mime='text/plain') {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
@@ -290,19 +304,26 @@ function renderDetails() {
   const iterRow = c.solveIter
     ? `<div class="det-row"><span class="det-key">iterations</span><span class="det-val">${c.solveIter}</span></div>`
     : '';
+  const attemptsRow = `<div class="det-row"><span class="det-key">attempts</span><span class="det-val">${c.attempts||0}</span></div>`;
+  const history = (c.history||[]).slice(-5).reverse();
+  const historyBlock = history.length
+    ? `<div class="det-divider">├─ recent runs ──────────────────────────────────────────────────</div>
+       <div class="det-desc">${history.map(h => `${h.at} | ${h.status.toUpperCase()} | ${h.runtime}s | ${h.model||'?'}${h.error?` | ${esc(h.error)}`:''}`).join('\n')}</div>`
+    : '';
   body.innerHTML = `
     <div class="det-row"><span class="det-key">name</span><span class="det-val v-white">${esc(c.name)}</span></div>
     <div class="det-row"><span class="det-key">category</span><span class="det-val">${esc(c.category)}</span></div>
     <div class="det-row"><span class="det-key">difficulty</span><span class="det-val">${esc(c.difficulty)}</span></div>
     <div class="det-row"><span class="det-key">points</span><span class="det-val">${c.points}</span></div>
     <div class="det-row"><span class="det-key">status</span><span class="det-val ${sCls}">${c.status.toUpperCase()}${c.status==='solving'?' <span class="spin">◌</span>':''}</span></div>
-    ${runtimeRow}${modelRow}${iterRow}
+    ${runtimeRow}${modelRow}${iterRow}${attemptsRow}
     ${c.platform_id?`<div class="det-row"><span class="det-key">platform id</span><span class="det-val v-mid">${esc(c.platform_id)}</span></div>`:''}
     ${c.instance?`<div class="det-row"><span class="det-key">instance</span><span class="det-val">${esc(c.instance)}</span></div>`:''}
     ${c.workspace?`<div class="det-row"><span class="det-key">workspace</span><span class="det-val v-mid" style="font-size:10px">${esc(c.workspace)}</span></div>`:''}
     <div class="det-divider">├─ description ──────────────────────────────────────────────────</div>
     <div class="det-desc">${esc(c.description||'(no description)')}</div>
     ${c.files?`<div class="det-divider">├─ files ─────────────────────────────────────────────────────────</div><div class="det-desc">${esc(c.files)}</div>`:''}
+    ${historyBlock}
     ${c.flag?`<div class="flag-display">${esc(c.flag)}</div>`:''}
     <div class="det-divider">└────────────────────────────────────────────────────────────────</div>`;
 }
@@ -392,6 +413,10 @@ async function solveCh(c) {
   if (!settings.apiKey)    { addLog('err','No API key — open Settings → API & Engine','red'); return; }
   if (!settings.solverPath){ addLog('err','No solver path — open Settings → Python & Tools','red'); return; }
 
+  c.attempts = (c.attempts || 0) + 1;
+  c.lastError = '';
+  if (!Array.isArray(c.history)) c.history = [];
+
   c.status='solving'; c.flag=null; c.runtime=null; c.solveModel=null; c.solveIter=null;
   renderList(); if(selectedId===c.id) renderDetails(); updateStats();
   document.getElementById('solving-indicator').style.display='';
@@ -407,6 +432,8 @@ async function solveCh(c) {
   _startRuntimeTimer(c);
   addLog('sys',`━━━ Solving: [${c.category}] ${c.name} ━━━`,'bright');
   addLog('sys',`Budget: auto (score-guided) | Parallel branches: ${settings.parallelBranches?'on':'off'}`,'dim');
+
+  let solveErr = '';
 
   try {
     const raw = await invoke('solve_challenge', {
@@ -458,6 +485,8 @@ async function solveCh(c) {
     if (res.model)     { c.solveModel= res.model; }
   } catch(err) {
     c.status='failed';
+    solveErr = String(err);
+    c.lastError = solveErr;
     addLog('err',`Invoke error: ${err}`,'red');
   }
 
@@ -467,6 +496,16 @@ async function solveCh(c) {
 
   addLog('sys',`━━━ Done: ${c.name} → ${c.status.toUpperCase()} | ${elapsed}s ━━━`,
     c.status==='solved'?'white':c.status==='failed'?'red':'');
+
+  c.history.push({
+    at: new Date().toLocaleString(),
+    status: c.status,
+    runtime: elapsed,
+    model: c.solveModel || activeModel(),
+    error: solveErr,
+  });
+  if (c.history.length > 12) c.history = c.history.slice(-12);
+
   document.getElementById('solving-indicator').style.display='none';
   renderList(); if(selectedId===c.id) renderDetails(); updateStats();
 }
@@ -585,7 +624,8 @@ const App = {
     if (!name) return;
     const c={id:uid(),name,category:cat,description:'',files:'',instance:'',
              flagFormat:'',points:100,difficulty:'medium',
-             status:'staged',flag:null,workspace:'',platform_id:'',createdAt:Date.now()};
+             status:'staged',flag:null,workspace:'',platform_id:'',createdAt:Date.now(),
+             attempts:0, history:[], lastError:''};
     addChallenge(c);
     g('qa-name').value='';
     App.select(c.id);
@@ -611,7 +651,8 @@ const App = {
              files:gv('m-files').trim(),instance:gv('m-inst').trim(),
              flagFormat:gv('m-fmt').trim(),points:parseInt(gv('m-pts'))||100,
              difficulty:gv('m-diff'),status:'staged',flag:null,
-             workspace:'',platform_id:'',createdAt:Date.now()};
+             workspace:'',platform_id:'',createdAt:Date.now(),
+             attempts:0, history:[], lastError:''};
     addChallenge(c); App.closeModal(); App.select(c.id);
     addLog('sys',`Added: [${c.category}] ${c.name}`,'bright');
   },
@@ -633,6 +674,7 @@ const App = {
   },
 
   async solveAll() {
+    if (queueState.running) { addLog('warn','Queue already running.'); return; }
     const statuses = ['staged','queued'];
     if(settings.retryFailed) statuses.push('failed');
     const queue=challenges.filter(c=>statuses.includes(c.status));
@@ -641,14 +683,96 @@ const App = {
     queue.forEach(c=>{ if(c.status!=='solving') c.status='queued'; });
     renderList(); updateStats();
 
+    queueState.running = true;
+    queueState.paused = false;
+    queueState.cancelled = false;
+
     const concur = Number(settings.concurrent)||1;
     for(let i=0;i<queue.length;i+=concur) {
+      if (queueState.cancelled) break;
+      while (queueState.paused && !queueState.cancelled) {
+        await sleep(250);
+      }
+      if (queueState.cancelled) break;
       const batch=queue.slice(i,i+concur);
       await Promise.all(batch.map(c=>solveCh(c)));
     }
+
+    queueState.running = false;
+    queueState.paused = false;
+    const msg = queueState.cancelled ? 'Queue cancelled.' : 'Queue complete.';
+    queueState.cancelled = false;
+    addLog('sys', msg, 'bright');
+  },
+
+  pauseQueue() {
+    if (!queueState.running) { addLog('warn','Queue is not running.'); return; }
+    queueState.paused = true;
+    addLog('sys','Queue paused.','bright');
+  },
+
+  resumeQueue() {
+    if (!queueState.running) { addLog('warn','Queue is not running.'); return; }
+    queueState.paused = false;
+    addLog('sys','Queue resumed.','bright');
+  },
+
+  retrySelected() {
+    if (!selectedId) { addLog('warn','No challenge selected.'); return; }
+    const c = ch(selectedId);
+    if (!c) return;
+    c.status = 'staged';
+    c.flag = null;
+    c.lastError = '';
+    renderList(); renderDetails(); updateStats();
+    addLog('sys',`Marked for retry: ${c.name}`,'bright');
+  },
+
+  prioritizeSelected() {
+    if (!selectedId) { addLog('warn','No challenge selected.'); return; }
+    const c = ch(selectedId);
+    if (!c) return;
+    if (!['staged','queued','failed'].includes(c.status)) {
+      addLog('warn','Only queued/staged/failed challenges can be prioritized.');
+      return;
+    }
+    c.status = 'queued';
+    c.createdAt = Date.now() - 999999999;
+    renderList(); updateStats();
+    addLog('sys',`Prioritized: ${c.name}`,'bright');
+  },
+
+  generateSolvedWriteups() {
+    const solved = challenges.filter(c => c.status === 'solved');
+    if (!solved.length) { addLog('warn','No solved challenges found.'); return; }
+    const lines = [
+      `# ${settings.ctfName || 'CTF'} — Solved Challenges`,
+      ``,
+      `Generated: ${new Date().toLocaleString()}`,
+      ``,
+    ];
+    solved.forEach((c, i) => {
+      lines.push(`## ${i+1}. ${c.name}`);
+      lines.push(`- Category: ${c.category}`);
+      lines.push(`- Difficulty: ${c.difficulty}`);
+      lines.push(`- Points: ${c.points}`);
+      lines.push(`- Flag: ${c.flag || '(not stored)'}`);
+      lines.push(`- Runtime: ${c.runtime || '?'}s`);
+      lines.push(`- Model: ${c.solveModel || '?'}`);
+      if (c.description) {
+        lines.push(``);
+        lines.push(`### Description`);
+        lines.push(c.description);
+      }
+      lines.push(``);
+    });
+    downloadTextFile(`${(settings.ctfName || 'ctf').replace(/\s+/g,'_').toLowerCase()}-solved-writeups-${nowStamp()}.md`, lines.join('\n'), 'text/markdown');
+    addLog('ok', `Generated consolidated writeup for ${solved.length} solved challenge(s).`, 'white');
   },
 
   async cancelSolve() {
+    queueState.cancelled = true;
+    queueState.paused = false;
     try{ await invoke('cancel_solve'); addLog('sys','Cancel signal sent.'); }
     catch(e){ addLog('err',`Cancel failed: ${e}`,'red'); }
   },
@@ -703,6 +827,7 @@ const App = {
           points:pc.points||0, difficulty:pc.difficulty||'medium',
           status:pc.solved?'solved':'staged', flag:null,
           workspace:pc.workspace||'', createdAt:Date.now(),
+          attempts:0, history:[], lastError:'',
         });
       });
       renderList(); updateStats();
@@ -802,7 +927,29 @@ const App = {
 
   closeSettings() { g('settings-overlay').classList.remove('open'); },
 
-  saveSettings() {
+  async saveSettings() {
+    const candidateApiKey = gv('s-apikey').trim();
+    const candidatePython = gv('s-python').trim() || 'python3';
+    const candidateSolver = gv('s-solver').trim();
+    const candidateBaseDir= gv('s-basedir').trim();
+
+    try {
+      const validation = await invoke('validate_settings', {
+        apiKey: candidateApiKey,
+        pythonPath: candidatePython,
+        solverPath: candidateSolver,
+        baseDir: candidateBaseDir,
+      });
+      (validation.warnings||[]).forEach(w => addLog('warn', `[settings] ${w}`));
+      if (!validation.ok) {
+        (validation.errors||[]).forEach(e => addLog('err', `[settings] ${e}`, 'red'));
+        alert(`Fix settings errors before saving:\n\n${(validation.errors||[]).join('\n')}`);
+        return;
+      }
+    } catch (e) {
+      addLog('warn', `Settings validation unavailable: ${e}`);
+    }
+
     settings.apiKey       = gv('s-apikey').trim();
     settings.model        = gv('s-model');
     settings.modelCustom  = gv('s-model-custom').trim();
@@ -884,6 +1031,7 @@ const App = {
 
     persistSettings(); applyAll(); App.closeSettings();
     addLog('sys','Settings saved and applied.','bright');
+    App.runEnvironmentDiagnostics();
   },
 
   // Live UI preview (called from onchange in HTML)
@@ -1076,6 +1224,152 @@ const App = {
     } catch(e) {
       el.textContent=`Could not auto-detect: ${e}`;
     }
+  },
+
+  async runEnvironmentDiagnostics() {
+    try {
+      const diag = await invoke('diagnose_environment', {
+        pythonPath: settings.pythonPath || 'python3',
+        solverPath: settings.solverPath || '',
+        baseDir: settings.baseDir || '',
+      });
+      g('diag-python').textContent = diag.python_ok ? (diag.python_version || 'ok') : 'missing';
+      g('diag-solver').textContent = diag.solver_exists ? 'ok' : 'missing';
+      g('diag-webkit').textContent = diag.webkit_acceleration || 'unknown';
+      g('diag-workdir').textContent = diag.base_dir_writable ? 'writable' : 'not writable';
+      (diag.notes||[]).forEach(n => addLog('warn', `[diag] ${n}`));
+    } catch (e) {
+      addLog('err', `Diagnostics failed: ${e}`, 'red');
+      g('diag-python').textContent = 'error';
+      g('diag-solver').textContent = 'error';
+      g('diag-webkit').textContent = 'error';
+      g('diag-workdir').textContent = 'error';
+    }
+  },
+
+  async checkToolCapabilities() {
+    const list = ['binwalk','john','hashcat','exiftool','steghide','strings','file','xxd'];
+    const outEl = g('tool-cap-results');
+    outEl.textContent = 'checking...';
+    try {
+      const caps = await invoke('check_tool_capabilities', { tools: list });
+      outEl.innerHTML = caps.map(c => {
+        const st = c.available ? 'ready' : 'missing';
+        const path = c.path || 'not found';
+        return `<div><strong>${esc(c.tool)}</strong> — ${st} <span style="color:var(--text-dim)">(${esc(path)})</span></div>`;
+      }).join('');
+    } catch (e) {
+      outEl.textContent = `tool check failed: ${e}`;
+    }
+  },
+
+  exportSession() {
+    const payload = {
+      kind: 'ctf-solver-session',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      ctfName: settings.ctfName,
+      settings: {
+        ctfName: settings.ctfName,
+        baseDir: settings.baseDir,
+        platform: settings.platform,
+      },
+      challenges,
+    };
+    downloadTextFile(`${(settings.ctfName || 'ctf-session').replace(/\s+/g,'_')}-${nowStamp()}.json`, JSON.stringify(payload, null, 2), 'application/json');
+    addLog('sys','Session exported.','bright');
+  },
+
+  importSessionFile() { g('session-file-input').click(); },
+
+  loadSessionFile(input) {
+    const file = input.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const data = JSON.parse(e.target.result);
+        if (data.kind !== 'ctf-solver-session' || !Array.isArray(data.challenges)) {
+          throw new Error('Invalid session format');
+        }
+        if (!confirm(`Load session '${data.ctfName || 'unknown'}'? This will replace current challenges.`)) {
+          return;
+        }
+        challenges = data.challenges;
+        selectedId = null;
+        settings.ctfName = data.settings?.ctfName || settings.ctfName;
+        settings.baseDir = data.settings?.baseDir || settings.baseDir;
+        settings.platform = data.settings?.platform || settings.platform;
+        persistSettings();
+        applyAll();
+        renderList(); renderDetails(); updateStats();
+        addLog('ok',`Loaded session with ${challenges.length} challenge(s).`,'white');
+      } catch (err) {
+        addLog('err',`Failed to load session: ${err}`,'red');
+      }
+    };
+    reader.readAsText(file);
+    input.value = '';
+  },
+
+  exportTheme() {
+    const theme = {
+      kind: 'ctf-solver-theme',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      preset: gv('s-theme-preset') || 'custom',
+      values: {
+        colBg: gv('s-col-bg'), colAccent: gv('s-col-accent'), colBorder: gv('s-col-border'),
+        colTextDim: gv('s-col-text-dim'), colTextMid: gv('s-col-text-mid'), colTextBright: gv('s-col-text-bright'),
+        scanlineOpacity: gv('s-scanline-opacity'), font: gv('s-font'), fontSize: gv('s-font-size'),
+        lineHeight: gv('s-line-height'), split: gv('s-split'), panelWidth: gv('s-panel-width'),
+      },
+    };
+    downloadTextFile(`theme-${nowStamp()}.json`, JSON.stringify(theme, null, 2), 'application/json');
+    addLog('sys','Theme exported.','bright');
+  },
+
+  importThemeFile() { g('theme-file-input').click(); },
+
+  loadThemeFile(input) {
+    const file = input.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const data = JSON.parse(e.target.result);
+        if (data.kind !== 'ctf-solver-theme') throw new Error('Invalid theme format');
+        const v = data.values || {};
+        if (v.colBg) { sv('s-col-bg', v.colBg); sv('s-col-bg-hex', v.colBg); }
+        if (v.colAccent) { sv('s-col-accent', v.colAccent); sv('s-col-accent-hex', v.colAccent); }
+        if (v.colBorder) { sv('s-col-border', v.colBorder); sv('s-col-border-hex', v.colBorder); }
+        if (v.colTextDim) { sv('s-col-text-dim', v.colTextDim); sv('s-col-text-dim-hex', v.colTextDim); }
+        if (v.colTextMid) { sv('s-col-text-mid', v.colTextMid); sv('s-col-text-mid-hex', v.colTextMid); }
+        if (v.colTextBright) { sv('s-col-text-bright', v.colTextBright); sv('s-col-text-bright-hex', v.colTextBright); }
+        if (v.scanlineOpacity) sv('s-scanline-opacity', v.scanlineOpacity);
+        if (v.font) sv('s-font', v.font);
+        if (v.fontSize) sv('s-font-size', v.fontSize);
+        if (v.lineHeight) sv('s-line-height', v.lineHeight);
+        if (v.split) sv('s-split', v.split);
+        if (v.panelWidth) sv('s-panel-width', v.panelWidth);
+        sv('s-theme-preset', 'custom');
+        App.applyUISettings();
+        addLog('ok','Theme imported.','white');
+      } catch (err) {
+        addLog('err',`Failed to import theme: ${err}`,'red');
+      }
+    };
+    reader.readAsText(file);
+    input.value = '';
+  },
+
+  resetThemeProfile() {
+    const preset = gv('s-theme-preset');
+    if (preset && preset !== 'custom') {
+      App.applyThemePreset();
+      addLog('sys',`Theme reset to preset: ${preset}.`,'bright');
+      return;
+    }
+    App.resetColors();
+    addLog('sys','Theme reset to defaults.','bright');
   },
 
   // ── Export / Import settings ─────────────────────────────────────────────────
@@ -1320,6 +1614,7 @@ const App = {
           points:pc.points||0, difficulty:pc.difficulty||'medium',
           status:pc.solved?'solved':'staged', flag:null,
           workspace:pc.workspace||'', createdAt:Date.now(),
+          attempts:0, history:[], lastError:'',
         });
         added++;
       });
@@ -1563,6 +1858,7 @@ g('btn-settings').addEventListener('click', ()=>App.openSettings());
 (function init() {
   loadSettings();
   applyAll();
+  App.runEnvironmentDiagnostics();
 
   if(!settings.solverPath) {
     invoke('get_bin_dir').then(dir=>{

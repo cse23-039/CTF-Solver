@@ -67,6 +67,15 @@
     </div>
   </div>
 
+  <div id="env-diag-panel">
+    <span class="diag-title">env</span>
+    <span class="diag-item">python:<span id="diag-python">—</span></span>
+    <span class="diag-item">solver:<span id="diag-solver">—</span></span>
+    <span class="diag-item">webkit:<span id="diag-webkit">—</span></span>
+    <span class="diag-item">workdir:<span id="diag-workdir">—</span></span>
+    <button class="btn" id="btn-refresh-diag" onclick="App.runEnvironmentDiagnostics()" style="margin-left:auto;padding:2px 8px">REFRESH DIAG</button>
+  </div>
+
   <!-- ══ MAIN ══════════════════════════════════════════════════════════════ -->
   <div id="main">
 
@@ -120,7 +129,12 @@
         <div id="detail-actions">
           <button class="btn btn-primary" onclick="App.solveSelected()">▶ SOLVE</button>
           <button class="btn"             onclick="App.solveAll()">⚡ ALL</button>
+          <button class="btn"             onclick="App.pauseQueue()">⏸ PAUSE Q</button>
+          <button class="btn"             onclick="App.resumeQueue()">▶ RESUME Q</button>
+          <button class="btn"             onclick="App.retrySelected()">↺ RETRY</button>
+          <button class="btn"             onclick="App.prioritizeSelected()">↑ PRIORITY</button>
           <button class="btn"             onclick="App.cancelSolve()">✕ CANCEL</button>
+          <button class="btn"             onclick="App.generateSolvedWriteups()">📝 WRITEUPS</button>
           <button class="btn"             onclick="App.clearLog()">CLEAR LOG</button>
           <button class="btn"             id="btn-open-ws" onclick="App.openSelectedWorkspace()" style="display:none">📁 OPEN</button>
           <button class="btn btn-danger"  onclick="App.removeSelected()">DEL</button>
@@ -485,6 +499,13 @@
             </select>
           </div>
         </div>
+
+        <div class="sg-title" style="margin-top:12px">TOOL CAPABILITY CHECKER</div>
+        <div class="input-row" style="margin-bottom:8px">
+          <button class="btn" onclick="App.checkToolCapabilities()">CHECK SYSTEM TOOLS</button>
+          <span class="hint">Detects binwalk, john, hashcat, exiftool, steghide, strings, file, xxd.</span>
+        </div>
+        <div id="tool-cap-results" class="hint">Run checker to see ready/missing tools.</div>
       </div>
 
       <!-- ── Tab: Platform ────────────────────────────────────────────── -->
@@ -557,6 +578,13 @@
           <textarea class="form-ctrl is-textarea" id="s-flag-patterns" style="min-height:80px"
             placeholder="e.g.\nmyctf\{[^}]+\}\nSECRET-[A-Z0-9]{16}"></textarea>
           <div class="hint">Built-in: picoCTF{}, flag{}, CTF{}, HTB{}, DUCTF{}, thm{}, corctf{}, uiuctf{}</div>
+        </div>
+
+        <div class="sg-title">SESSION MANAGER</div>
+        <div class="input-row">
+          <button class="btn" onclick="App.exportSession()">⬇ EXPORT SESSION</button>
+          <button class="btn" onclick="App.importSessionFile()">⬆ IMPORT SESSION</button>
+          <span class="hint">Save/load challenge sets per CTF event.</span>
         </div>
       </div>
 
@@ -763,6 +791,12 @@
           <button class="btn" onclick="App.resetColors()">RESET COLOURS TO DEFAULT</button>
         </div>
 
+        <div class="form-group">
+          <button class="btn" onclick="App.exportTheme()">⬇ EXPORT THEME</button>
+          <button class="btn" onclick="App.importThemeFile()">⬆ IMPORT THEME</button>
+          <button class="btn" onclick="App.resetThemeProfile()">RESET BY PROFILE</button>
+        </div>
+
         <div class="sg-title">DISPLAY OPTIONS</div>
         <div class="toggles-grid">
           <label class="toggle-row">
@@ -812,6 +846,10 @@
       <button class="btn" onclick="App.importSettingsFile()">⬆ IMPORT SETTINGS</button>
       <input type="file" id="settings-file-input" accept=".json" style="display:none"
              onchange="App.loadSettingsFile(this)">
+            <input type="file" id="session-file-input" accept=".json" style="display:none"
+              onchange="App.loadSessionFile(this)">
+            <input type="file" id="theme-file-input" accept=".json" style="display:none"
+              onchange="App.loadThemeFile(this)">
       <button class="btn btn-danger" onclick="App.resetAllSettings()">RESET ALL DEFAULTS</button>
       <button class="btn btn-primary" onclick="App.saveSettings()" style="margin-left:auto">
         ✓ SAVE &amp; APPLY

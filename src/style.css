@@ -83,6 +83,19 @@ body.scanlines::after {
 .pb-val   { color:var(--text-mid); }
 .pb-val.active { color:var(--text-bright); }
 
+#env-diag-panel {
+  background:var(--bg-panel);
+  border-bottom:1px solid var(--border);
+  padding:4px 10px;
+  display:flex;
+  align-items:center;
+  gap:10px;
+  font-size:10px;
+}
+.diag-title { color:var(--text-dim); text-transform:uppercase; letter-spacing:1px; }
+.diag-item { color:var(--text-dim); }
+.diag-item span { color:var(--text-mid); margin-left:4px; }
+
 /* ── Main Layout ───────────────────────────────────────────────────────── */
 #main {
   display:grid;
@@ -405,6 +418,16 @@ body.scanlines::after {
 
 /* Hint text */
 .hint { font-size:10px; color:var(--text-dim); margin-top:4px; line-height:1.5; }
+
+#tool-cap-results {
+  border:1px solid var(--border);
+  background:var(--bg-input);
+  border-radius:2px;
+  padding:8px;
+  font-size:10px;
+  max-height:140px;
+  overflow-y:auto;
+}
 
 /* Input row (input + buttons inline) */
 .input-row { display:flex; gap:6px; align-items:center; }

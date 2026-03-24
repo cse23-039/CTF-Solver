@@ -34,20 +34,24 @@ SUDO=""
 [[ $EUID -ne 0 ]] && SUDO="sudo"
 
 # Ensure gem and cargo bins are in PATH
-export PATH="$PATH:/usr/local/bin:$HOME/.gem/bin:$HOME/.cargo/bin:$(ruby -e 'puts Gem.bindir' 2>/dev/null || true)"
+export PATH="$PATH:/usr/local/bin:$HOME/.local/bin:$HOME/.gem/bin:$HOME/.cargo/bin:$(ruby -e 'puts Gem.bindir' 2>/dev/null || true)"
 
 apt_get()  {
+    local failed=0
     for pkg in "$@"; do
         $SUDO apt-get install -y --no-install-recommends "$pkg" 2>/dev/null \
-        || warn "apt: failed: $pkg"
+        || { warn "apt: failed: $pkg"; failed=1; }
     done
+    return $failed
 }
 pip_get()  {
+    local failed=0
     for pkg in "$@"; do
         pip3 install --quiet --break-system-packages "$pkg" 2>/dev/null \
         || pip3 install --quiet "$pkg" 2>/dev/null \
-        || warn "pip: failed: $pkg"
+        || { warn "pip: failed: $pkg"; failed=1; }
     done
+    return $failed
 }
 gem_get()  {
     $SUDO gem install --quiet --no-document "$@" 2>/dev/null \
@@ -63,7 +67,7 @@ $SUDO apt-get update -qq
 hdr "Base build tools"
 apt_get \
     build-essential git curl wget \
-    python3 python3-pip python3-dev python3-venv \
+    python3 python3-pip python3-dev python3-venv pipx \
     ruby ruby-dev \
     nodejs npm \
     default-jdk \
@@ -280,13 +284,25 @@ ok "gems done"
 hdr "Node packages"
 # Ensure npm global prefix is writable
 NPM_PREFIX=$($SUDO npm config get prefix 2>/dev/null || echo "/usr/local")
-for npm_pkg in js-beautify hermes-dec; do
-    $SUDO npm install -g --quiet --prefix "$NPM_PREFIX" "$npm_pkg" 2>/dev/null \
-    && ok "npm: $npm_pkg" \
-    || npm install -g --quiet "$npm_pkg" 2>/dev/null \
-    && ok "npm: $npm_pkg" \
-    || warn "npm: failed: $npm_pkg"
-done
+
+if $SUDO npm install -g --quiet --prefix "$NPM_PREFIX" js-beautify 2>/dev/null \
+   || npm install -g --quiet js-beautify 2>/dev/null; then
+    command -v js-beautify &>/dev/null && ok "npm: js-beautify" || warn "npm: js-beautify installed but not in PATH"
+else
+    warn "npm: failed: js-beautify"
+fi
+
+if $SUDO npm install -g --quiet --prefix "$NPM_PREFIX" hermes-dec 2>/dev/null \
+   || npm install -g --quiet hermes-dec 2>/dev/null \
+   || pip3 install --quiet --break-system-packages "git+https://github.com/P1sec/hermes-dec.git" 2>/dev/null; then
+    if command -v hermes-dec &>/dev/null || command -v hbc-disassembler &>/dev/null || command -v hbcdump &>/dev/null; then
+        ok "hermes-dec"
+    else
+        warn "hermes-dec installed but no CLI found (expected: hermes-dec, hbc-disassembler, or hbcdump)"
+    fi
+else
+    warn "hermes-dec: failed"
+fi
 
 # ─── 12. Special tool installs ───────────────────────────────────────────────
 hdr "Special tool installs"
@@ -384,20 +400,19 @@ if ! command -v apktool &>/dev/null; then
 else ok "apktool already installed"; fi
 
 # ── RsaCtfTool ───────────────────────────────────────────────────────────────
-if ! command -v RsaCtfTool &>/dev/null && [[ ! -f /opt/RsaCtfTool/RsaCtfTool.py ]]; then
+if ! command -v RsaCtfTool &>/dev/null && ! command -v rsactftool &>/dev/null && [[ ! -f /opt/RsaCtfTool/RsaCtfTool.py ]]; then
     log "RsaCtfTool..."
-    $SUDO rm -rf /opt/RsaCtfTool
-    git clone --depth=1 https://github.com/RsaCtfTool/RsaCtfTool ~/RsaCtfTool_src 2>/dev/null \
-    && python3 -m venv ~/RsaCtfTool_src/venv 2>/dev/null \
-    && ~/RsaCtfTool_src/venv/bin/pip install --quiet -r ~/RsaCtfTool_src/requirements.txt 2>/dev/null \
-    && $SUDO cp -r ~/RsaCtfTool_src /opt/RsaCtfTool \
-    && $SUDO chmod +x /opt/RsaCtfTool/RsaCtfTool.py \
-    && printf '#!/bin/bash\n/opt/RsaCtfTool/venv/bin/python /opt/RsaCtfTool/RsaCtfTool.py "$@"\n' \
-        | $SUDO tee /usr/local/bin/RsaCtfTool >/dev/null \
-    && $SUDO chmod +x /usr/local/bin/RsaCtfTool \
+    TOOL_DIR="$HOME/.local/share/RsaCtfTool"
+    rm -rf "$TOOL_DIR"
+    git clone --depth=1 https://github.com/RsaCtfTool/RsaCtfTool "$TOOL_DIR" 2>/dev/null \
+    && python3 -m venv "$TOOL_DIR/venv" 2>/dev/null \
+    && "$TOOL_DIR/venv/bin/pip" install --quiet -r "$TOOL_DIR/requirements.txt" 2>/dev/null \
+    && chmod +x "$TOOL_DIR/RsaCtfTool.py" \
+    && printf '#!/bin/bash\n"%s"/venv/bin/python "%s"/RsaCtfTool.py "$@"\n' "$TOOL_DIR" "$TOOL_DIR" > "$HOME/.local/bin/RsaCtfTool" \
+    && chmod +x "$HOME/.local/bin/RsaCtfTool" \
+    && { $SUDO ln -sf "$HOME/.local/bin/RsaCtfTool" /usr/local/bin/RsaCtfTool 2>/dev/null || true; } \
     && ok "RsaCtfTool" \
     || warn "RsaCtfTool: failed"
-    rm -rf ~/RsaCtfTool_src
 else ok "RsaCtfTool already installed"; fi
 
 # ── tplmap ───────────────────────────────────────────────────────────────────
@@ -534,7 +549,7 @@ chk "pikepdf"           "python3 -c 'import pikepdf'"
 chk "pyzbar"            "python3 -c 'from pyzbar.pyzbar import decode'"
 chk "blackboxprotobuf"  "python3 -c 'import blackboxprotobuf'"
 chk "basecrack"         "python3 -c 'import basecrack'"
-chk "rsactftool"        "command -v RsaCtfTool || test -f /opt/RsaCtfTool/RsaCtfTool.py"
+chk "rsactftool"        "command -v RsaCtfTool || command -v rsactftool || test -f /opt/RsaCtfTool/RsaCtfTool.py || test -f $HOME/.local/share/RsaCtfTool/RsaCtfTool.py"
 chk "floss"             "command -v floss"
 chk "gdb"               "gdb --version"
 chk "pwndbg"            "grep -q pwndbg ~/.gdbinit"
@@ -567,6 +582,7 @@ chk "volatility3"       "python3 -c 'import volatility3'"
 chk "sage"              "command -v sage"
 chk "node"              "node --version"
 chk "js-beautify"       "js-beautify --version"
+chk "hermes-dec"        "command -v hermes-dec || command -v hbc-disassembler || command -v hbcdump"
 chk "java"              "java -version"
 chk "rustc"             "rustc --version"
 chk "sqlmap"            "sqlmap --version"

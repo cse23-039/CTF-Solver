@@ -2,6 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
+use std::process::Command as StdCommand;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -30,6 +33,30 @@ pub struct SolveResult {
     pub flag: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct EnvironmentDiagnostics {
+    pub python_ok: bool,
+    pub python_version: String,
+    pub solver_exists: bool,
+    pub base_dir_writable: bool,
+    pub webkit_acceleration: String,
+    pub notes: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SettingsValidation {
+    pub ok: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ToolCapability {
+    pub tool: String,
+    pub available: bool,
+    pub path: String,
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn emit_log(app: &AppHandle, tag: &str, msg: &str, cls: &str) {
@@ -40,6 +67,180 @@ fn emit_log(app: &AppHandle, tag: &str, msg: &str, cls: &str) {
         cls: cls.to_string(),
     };
     app.emit_all("solver-log", event).ok();
+}
+
+fn command_output_trimmed(mut cmd: StdCommand) -> String {
+    match cmd.output() {
+        Ok(output) => {
+            let mut s = String::from_utf8_lossy(&output.stdout).to_string();
+            if s.trim().is_empty() {
+                s = String::from_utf8_lossy(&output.stderr).to_string();
+            }
+            s.trim().to_string()
+        }
+        Err(_) => String::new(),
+    }
+}
+
+fn find_tool_path(tool: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        command_output_trimmed({
+            let mut c = StdCommand::new("where");
+            c.arg(tool);
+            c
+        })
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        command_output_trimmed({
+            let mut c = StdCommand::new("sh");
+            c.args(["-lc", &format!("command -v {}", tool)]);
+            c
+        })
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string()
+    }
+}
+
+fn check_base_dir_writable(base_dir: &str) -> bool {
+    if base_dir.trim().is_empty() {
+        return false;
+    }
+    let dir = Path::new(base_dir);
+    if !dir.exists() || !dir.is_dir() {
+        return false;
+    }
+    let probe = dir.join(".ctf_solver_write_test");
+    match fs::write(&probe, b"ok") {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[tauri::command]
+fn diagnose_environment(python_path: String, solver_path: String, base_dir: String) -> Result<EnvironmentDiagnostics, String> {
+    let mut notes = Vec::new();
+
+    let python_version = command_output_trimmed({
+        let mut c = StdCommand::new(&python_path);
+        c.arg("--version");
+        c
+    });
+    let python_ok = !python_version.is_empty();
+    if !python_ok {
+        notes.push(format!("Python executable not runnable: {}", python_path));
+    }
+
+    let solver_exists = !solver_path.trim().is_empty() && Path::new(&solver_path).exists();
+    if !solver_exists {
+        notes.push(format!("Solver path not found: {}", solver_path));
+    }
+
+    let base_dir_writable = check_base_dir_writable(&base_dir);
+    if !base_dir_writable {
+        notes.push(format!("Base dir missing or not writable: {}", base_dir));
+    }
+
+    let webkit_acceleration = {
+        #[cfg(target_os = "linux")]
+        {
+            let gl = command_output_trimmed({
+                let mut c = StdCommand::new("sh");
+                c.args(["-lc", "glxinfo -B 2>/dev/null | grep -i 'renderer string' || true"]);
+                c
+            });
+            if std::env::var("LIBGL_ALWAYS_SOFTWARE").unwrap_or_default() == "1" || gl.to_lowercase().contains("llvmpipe") {
+                "software".to_string()
+            } else if !gl.is_empty() {
+                "hardware".to_string()
+            } else {
+                "unknown".to_string()
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            "unknown".to_string()
+        }
+    };
+
+    Ok(EnvironmentDiagnostics {
+        python_ok,
+        python_version,
+        solver_exists,
+        base_dir_writable,
+        webkit_acceleration,
+        notes,
+    })
+}
+
+#[tauri::command]
+fn validate_settings(api_key: String, python_path: String, solver_path: String, base_dir: String) -> Result<SettingsValidation, String> {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    let key = api_key.trim();
+    if key.is_empty() {
+        errors.push("Anthropic API key is required.".to_string());
+    } else if !key.starts_with("sk-ant-") {
+        warnings.push("API key does not start with 'sk-ant-'. Verify it is correct.".to_string());
+    }
+
+    if python_path.trim().is_empty() {
+        errors.push("Python path is required.".to_string());
+    } else {
+        let py = command_output_trimmed({
+            let mut c = StdCommand::new(&python_path);
+            c.arg("--version");
+            c
+        });
+        if py.is_empty() {
+            errors.push(format!("Cannot run python executable '{}'.", python_path));
+        }
+    }
+
+    if solver_path.trim().is_empty() {
+        errors.push("Solver script path is required.".to_string());
+    } else if !Path::new(&solver_path).exists() {
+        errors.push(format!("Solver script does not exist: {}", solver_path));
+    }
+
+    if !base_dir.trim().is_empty() {
+        if !Path::new(&base_dir).exists() {
+            warnings.push(format!("Base directory does not exist yet: {}", base_dir));
+        } else if !check_base_dir_writable(&base_dir) {
+            errors.push(format!("Base directory is not writable: {}", base_dir));
+        }
+    }
+
+    Ok(SettingsValidation {
+        ok: errors.is_empty(),
+        errors,
+        warnings,
+    })
+}
+
+#[tauri::command]
+fn check_tool_capabilities(tools: Vec<String>) -> Result<Vec<ToolCapability>, String> {
+    let mut out = Vec::new();
+    for tool in tools {
+        let path = find_tool_path(&tool);
+        out.push(ToolCapability {
+            tool,
+            available: !path.is_empty(),
+            path,
+        });
+    }
+    Ok(out)
 }
 
 // ─── Commands ─────────────────────────────────────────────────────────────────
@@ -314,6 +515,9 @@ fn main() {
             get_bin_dir,
             open_folder,
             import_challenges,
+            diagnose_environment,
+            validate_settings,
+            check_tool_capabilities,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
