@@ -1,0 +1,1 @@
+No API key provided. Fallback critic: challenge assumptions, verify exploit preconditions, replay from clean snapshot.
