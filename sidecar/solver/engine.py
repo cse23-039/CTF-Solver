@@ -437,7 +437,8 @@ def _run_self_healing_preflight(category: str) -> dict:
 
 def _decide_strategy_mode(category: str, phase: str, fruitless: int, tool_failures: int,
                           iteration: int, total_iters: int, memory_diag: dict,
-                          learned_overrides: dict | None = None) -> dict:
+                          learned_overrides: dict | None = None,
+                          state_vector: dict | None = None) -> dict:
     return core_routing.decide_strategy_mode(
         category=category,
         phase=phase,
@@ -447,6 +448,7 @@ def _decide_strategy_mode(category: str, phase: str, fruitless: int, tool_failur
         total_iters=total_iters,
         memory_diag=memory_diag,
         learned_overrides=learned_overrides,
+        state_vector=state_vector,
     )
 
 
@@ -1203,6 +1205,23 @@ def _run_solve_impl(payload):
         "playbook": playbook,
     }
 
+    if bool(extra.get("replayMode", False)):
+        try:
+            from solver.replay import replay as _replay_rows
+            replay_path = os.path.join((ws or base_dir or os.getcwd()), ".solver", "decision_replay.jsonl")
+            rows = _replay_rows(replay_path, limit=int(extra.get("replayLimit", 250)))
+            action_counts = {}
+            for r in rows:
+                a = str((r.get("action") or {}).get("type", "unknown"))
+                action_counts[a] = int(action_counts.get(a, 0)) + 1
+            emit("replay_audit", rows=len(rows), actions=action_counts)
+            print(json.dumps({"type": "replay_audit", "rows": len(rows), "actions": action_counts}, ensure_ascii=False), flush=True)
+        except Exception as e:
+            emit("replay_audit", error=str(e))
+            print(json.dumps({"type": "replay_audit", "error": str(e)}, ensure_ascii=False), flush=True)
+        result("failed", workspace=ws)
+        return
+
     # ── Phase-3 adaptive engines (lazy imports to avoid hard startup dependency) ──
     _rank_branches_live = None
     _symbolic_orchestrate_live = None
@@ -1391,8 +1410,9 @@ def _run_solve_impl(payload):
         parallel_enabled = False
         emit("credit_guard", action="parallel_disabled", reason="low_budget")
 
-    if diff in ("hard","insane") and parallel_enabled:
-        log("sys","[PARALLEL] Hard challenge — attempting parallel branch solve first","bright")
+    allow_parallel_any = bool(extra.get("parallelBranchesAllDifficulties", True))
+    if parallel_enabled and (diff in ("hard", "insane") or allow_parallel_any):
+        log("sys","[PARALLEL] Attempting branch-budgeted parallel solve","bright")
         hypotheses = planner_hypotheses[:3] if planner_hypotheses else []
         if hypotheses and _should_early_stop_branch:
             kept = []
@@ -1506,6 +1526,8 @@ def _run_solve_impl(payload):
                             "dead_ends": [],
                             "summary": f"Parallel branch winner. Flag={found_flag}",
                             "validator": validation,
+                            "source_strength": 0.75,
+                            "reproducibility_count": 1,
                             "workspace": ws,
                         })
                     except Exception as e:
@@ -1683,6 +1705,22 @@ def _run_solve_impl(payload):
         iteration += 1
         solve_state.iteration = iteration
 
+        # Pre-route state vector snapshot for model routing and replay logging.
+        state_vector = {
+            "category": cat.lower(),
+            "phase": autonomous_state.get("phase", "recon"),
+            "signal_quality": max(0.0, min(1.0, len(evidence_log) / max(3.0, float(iteration * 2)))),
+            "reliability_trend": 0.0,
+            "contradiction_score": max(0.0, min(1.0, len(memory_diag.get("contradictions", [])) / 4.0)),
+            "exploit_maturity": max(0.0, min(1.0, len([x for x in solve_log[-20:] if "exploit" in str(x).lower()]) / 6.0)),
+            "fruitless": fruitless,
+            "tool_failures": tool_failures,
+            "progress": iteration / max(1, max_iterations),
+            "is_remote": bool(inst),
+            "has_binary": bool(challenge.get("binary_path", "") or challenge.get("file_path", "")),
+            "difficulty_pressure": max(0.0, min(1.0, (fruitless + tool_failures) / 8.0)),
+        }
+
         # ── Multi-model routing ──────────────────────────────────────────────
         progress_gap = (iteration - last_progress_iter if last_progress_iter else iteration) + contradiction_penalty
         route_decision = _route_model_v2(
@@ -1697,6 +1735,7 @@ def _run_solve_impl(payload):
             opus_budget_remaining=opus_budget_remaining,
             memory_hits_count=trusted_memory_hits_count,
             learned_overrides=learned_overrides,
+            state_vector=state_vector,
         )
         model = route_decision["model"]
         use_thinking = route_decision["use_thinking"]
@@ -1792,6 +1831,7 @@ def _run_solve_impl(payload):
             total_iters=max_iterations,
             memory_diag=memory_diag,
             learned_overrides=learned_overrides,
+            state_vector=state_vector,
         )
         if attack_graph and _a_star_attack_path:
             try:
@@ -2119,13 +2159,25 @@ def _run_solve_impl(payload):
                 })
         if tool_candidates:
             reliability = _TOOL_RUNTIME.reliability_snapshot()
+            ctx_rel = {}
+            try:
+                ctx_key = _TOOL_RUNTIME.context_key({
+                    "is_remote": bool(inst),
+                    "binary_type": "elf" if bool(challenge.get("binary_path", "") or challenge.get("file_path", "")) else "none",
+                    "phase": autonomous_state.get("phase", "recon"),
+                    "latency_bucket": "high" if (bool(inst) and iteration > 2) else "low",
+                })
+                ctx_rel = _TOOL_RUNTIME.contextual_reliability_snapshot(ctx_key)
+            except Exception:
+                ctx_rel = {}
             belief_uncertainty = {k: v.uncertainty for k, v in solve_state.beliefs.items()}
-            ranked = core_routing.schedule_tools_by_voi(tool_candidates, strategy, reliability, belief_uncertainty)
+            merged_rel = {**reliability, **{k: ((0.4 * reliability.get(k, 0.5)) + (0.6 * v)) for k, v in ctx_rel.items()}}
+            ranked = core_routing.schedule_tools_by_voi(tool_candidates, strategy, merged_rel, belief_uncertainty)
             if bandit:
                 try:
                     b_rank = bandit.rank(state_vector, [str(r.get("name", "")) for r in ranked])
                     b_score = {str(x.get("tool", "")): float(x.get("score", 0.5)) for x in b_rank}
-                    ranked.sort(key=lambda r: (0.65 * b_score.get(str(r.get("name", "")), 0.5)) + (0.35 * reliability.get(str(r.get("name", "")), 0.5)), reverse=True)
+                    ranked.sort(key=lambda r: (0.65 * b_score.get(str(r.get("name", "")), 0.5)) + (0.35 * merged_rel.get(str(r.get("name", "")), 0.5)), reverse=True)
                 except Exception:
                     pass
             ranked_blocks = [r["block"] for r in ranked]
@@ -2214,12 +2266,15 @@ def _run_solve_impl(payload):
                         pass
                 if hyp_manager and planner_hypotheses:
                     try:
-                        active_h = planner_hypotheses[0]
+                        active_h = hyp_manager.select_active(iteration=iteration, hint=f"{tname} {strategy.get('mode', '')}")
+                        if not active_h:
+                            active_h = planner_hypotheses[min(len(planner_hypotheses) - 1, iteration % max(1, len(planner_hypotheses))) ]
                         ev_gain = 0.12 if tool_ok else -0.08
                         hyp_manager.update(active_h, success=bool(tool_ok), evidence_gain=ev_gain, note=f"tool={tname}")
                         killed = hyp_manager.mark_kill_criteria(fruitless=fruitless, iteration=iteration, total_iters=max_iterations)
                         if killed:
                             emit("hypothesis_kill", iteration=iteration, killed=killed[:4])
+                        emit("hypothesis_lifecycle", iteration=iteration, summary=hyp_manager.summary()[:8])
                     except Exception:
                         pass
 
@@ -2387,6 +2442,8 @@ def _run_solve_impl(payload):
                     "dead_ends": pivot_events[-8:],
                     "summary": summary[:2000],
                     "validator": validation,
+                    "source_strength": 0.85 if len(evidence_log) >= 3 else 0.7,
+                    "reproducibility_count": max(1, len([e for e in evidence_log[-20:] if bool(e.get("success", False))])),
                     "model_route": route_history[-12:],
                     "strategy_history": strategy_history[-12:],
                     "workspace": final_ws,

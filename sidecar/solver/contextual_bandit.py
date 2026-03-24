@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -79,7 +80,9 @@ class ContextualBandit:
         ranked = []
         for t in tool_names:
             arm = ctx_table.setdefault(t, BetaArm())
-            ranked.append({"tool": t, "score": arm.prior(), "pulls": arm.pulls})
+            # Thompson sampling draw: encourages exploration under uncertainty.
+            sample = random.betavariate(max(1e-6, arm.alpha), max(1e-6, arm.beta))
+            ranked.append({"tool": t, "score": sample, "mean": arm.prior(), "pulls": arm.pulls})
         ranked.sort(key=lambda x: x["score"], reverse=True)
         return ranked
 

@@ -40,6 +40,9 @@ class ToolRuntime:
                     out[k[len(prefix):]] = rec.prior()
             return out
 
+    def context_key(self, context: dict[str, Any] | None) -> str:
+        return self._context_key(context)
+
     def _get(self, tool_name: str) -> ToolReliability:
         with self._lock:
             if tool_name not in self._stats:

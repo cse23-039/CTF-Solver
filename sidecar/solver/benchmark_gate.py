@@ -69,8 +69,9 @@ def evaluate(metrics: dict[str, Any], history_path: str, gates: dict[str, Any] |
         g.update(gates)
 
     rows = _load_history(history_path)
-    prev = rows[-1] if rows else None
     cohort = _cohort_key(metrics)
+    cohort_rows = [r for r in rows if str(r.get("cohort", "")) == cohort]
+    prev = cohort_rows[-1] if cohort_rows else None
 
     solve_rate = float(metrics.get("solve_rate", 0.0))
     false_flag_rate = float(metrics.get("false_flag_rate", 1.0))

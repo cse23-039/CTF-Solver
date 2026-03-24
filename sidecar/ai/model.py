@@ -164,7 +164,9 @@ def _select_model(category: str, difficulty: str, iteration: int,
 def _route_model_v2(category: str, difficulty: str, iteration: int, total_iters: int,
                     user_model: str, fruitless: int, tool_failures: int,
                     progress_gap: int, opus_budget_remaining: int,
-                    memory_hits_count: int = 0) -> dict:
+                    memory_hits_count: int = 0,
+                    learned_overrides: dict | None = None,
+                    state_vector: dict | None = None) -> dict:
     return core_routing.route_model_v2(
         category=category,
         difficulty=difficulty,
@@ -179,5 +181,7 @@ def _route_model_v2(category: str, difficulty: str, iteration: int, total_iters:
         model_opus=_MODEL_OPUS,
         model_haiku=_MODEL_HAIKU,
         memory_hits_count=memory_hits_count,
+        learned_overrides=learned_overrides,
+        state_vector=state_vector,
     )
 

@@ -62,3 +62,18 @@ class HypothesisManager:
             }
             for h in self._items.values()
         ]
+
+    def active_hypotheses(self) -> list[str]:
+        return [h.text for h in self._items.values() if h.status not in ("disproven", "validated")]
+
+    def select_active(self, iteration: int, hint: str = "") -> str | None:
+        active = self.active_hypotheses()
+        if not active:
+            return None
+        if hint:
+            hint_l = hint.lower()
+            for h in active:
+                if any(tok in h.lower() for tok in hint_l.split()[:3]):
+                    return h
+        idx = max(0, int(iteration)) % len(active)
+        return active[idx]

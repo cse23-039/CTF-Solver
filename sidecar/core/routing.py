@@ -13,7 +13,8 @@ def compute_expected_value_score(challenge: dict) -> float:
 
 def decide_strategy_mode(category: str, phase: str, fruitless: int, tool_failures: int,
                          iteration: int, total_iters: int, memory_diag: dict,
-                         learned_overrides: dict | None = None) -> dict:
+                         learned_overrides: dict | None = None,
+                         state_vector: dict | None = None) -> dict:
     cat = (category or "").lower()
     profile = get_profile(category, learned_overrides=learned_overrides)
     category_key = profile.get("category_key", "web")
@@ -41,6 +42,8 @@ def decide_strategy_mode(category: str, phase: str, fruitless: int, tool_failure
     mode = base_mode
 
     contradictions = len((memory_diag or {}).get("contradictions", []))
+    if isinstance(state_vector, dict):
+        contradictions = max(contradictions, int(round(float(state_vector.get("contradiction_score", 0.0)) * 4)))
     if contradictions > 0 and phase in ("recon", "exploit"):
         mode = "memory-guarded-verification"
         pivot = True
@@ -59,7 +62,8 @@ def decide_strategy_mode(category: str, phase: str, fruitless: int, tool_failure
 
     decay_f = float(profile.get("confidence_decay_fruitless", 0.08))
     decay_t = float(profile.get("confidence_decay_tool_failures", 0.12))
-    confidence = max(0.05, min(0.99, 1.0 - ((fruitless * decay_f) + (tool_failures * decay_t))))
+    pressure = float((state_vector or {}).get("difficulty_pressure", 0.0)) if isinstance(state_vector, dict) else 0.0
+    confidence = max(0.05, min(0.99, 1.0 - ((fruitless * decay_f) + (tool_failures * decay_t) + (pressure * 0.2))))
     # Apply category baseline priorities if strategy did not force specific tools.
     if mode not in ("validator-evidence-gate",):
         rec_tools = get_priority(category_key)
@@ -81,7 +85,8 @@ def route_model_v2(category: str, difficulty: str, iteration: int, total_iters: 
                    progress_gap: int, opus_budget_remaining: int,
                    model_sonnet: str, model_opus: str, model_haiku: str,
                    memory_hits_count: int = 0,
-                   learned_overrides: dict | None = None) -> dict:
+                   learned_overrides: dict | None = None,
+                   state_vector: dict | None = None) -> dict:
     profile = get_profile(category, learned_overrides=learned_overrides)
     hard_categories = {"Cryptography", "Reverse Engineering"}
     diff_score_map = {"easy": 20, "medium": 45, "hard": 70, "insane": 90}
@@ -89,8 +94,12 @@ def route_model_v2(category: str, difficulty: str, iteration: int, total_iters: 
     if category in hard_categories:
         complexity = min(100, complexity + 12)
 
-    uncertainty = min(100, (fruitless * 10) + (progress_gap * 7) + (12 if memory_hits_count == 0 else 0))
-    failure = min(100, (tool_failures * 18) + (20 if fruitless >= 4 else 0))
+    sv = state_vector or {}
+    sv_pressure = float(sv.get("difficulty_pressure", 0.0) or 0.0)
+    sv_contra = float(sv.get("contradiction_score", 0.0) or 0.0)
+    sv_signal = float(sv.get("signal_quality", 0.0) or 0.0)
+    uncertainty = min(100, (fruitless * 10) + (progress_gap * 7) + (12 if memory_hits_count == 0 else 0) + int(sv_contra * 22) + int((1.0 - sv_signal) * 12))
+    failure = min(100, (tool_failures * 18) + (20 if fruitless >= 4 else 0) + int(sv_pressure * 15))
     route_score = int((0.45 * complexity) + (0.30 * uncertainty) + (0.25 * failure))
 
     reasons = []
