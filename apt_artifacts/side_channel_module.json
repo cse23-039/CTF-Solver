@@ -1,0 +1,25 @@
+{
+  "timing": {
+    "sampling": "n>=30",
+    "test": "Welch t-test + z-score",
+    "confidence": 0.95
+  },
+  "cache": {
+    "methods": [
+      "prime+probe",
+      "flush+reload"
+    ],
+    "noise_model": "gaussian+burst"
+  },
+  "power": {
+    "methods": [
+      "CPA",
+      "DPA"
+    ],
+    "trace_alignment": "cross-correlation"
+  },
+  "simulation": {
+    "rounds": 1000,
+    "noise_sigma": 0.8
+  }
+}

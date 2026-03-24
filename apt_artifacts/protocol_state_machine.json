@@ -1,0 +1,46 @@
+{
+  "protocol": "tcp",
+  "inputs": {
+    "pcap": ""
+  },
+  "states": [
+    "INIT",
+    "NEGOTIATE",
+    "AUTH",
+    "SESSION",
+    "ERROR",
+    "DONE"
+  ],
+  "transitions": [
+    {
+      "from": "INIT",
+      "on": "banner",
+      "to": "NEGOTIATE"
+    },
+    {
+      "from": "NEGOTIATE",
+      "on": "hello/params",
+      "to": "AUTH"
+    },
+    {
+      "from": "AUTH",
+      "on": "token_ok",
+      "to": "SESSION"
+    },
+    {
+      "from": "AUTH",
+      "on": "token_fail",
+      "to": "ERROR"
+    }
+  ],
+  "grammar_templates": [
+    "MSG ::= HELLO VERSION CAPS",
+    "AUTH ::= USER TOKEN NONCE",
+    "REQ ::= VERB PATH ARGS"
+  ],
+  "fuzz_strategies": [
+    "state-aware mutation",
+    "grammar-aware generation",
+    "sequence reordering"
+  ]
+}

@@ -12,6 +12,11 @@ const DEFAULTS = {
   modelCustom:     '',
   maxIter:         0,           // 0 = auto (score-guided budget per difficulty)
   maxTokens:       4096,
+  creditBudgetUsd: 5,
+  ctfCreditBudgetUsd: 5,
+  creditLowThresholdUsd: 0.75,
+  enforceCreditBudget: true,
+  conservativeCredits: true,
   concurrent:      1,
   parallelBranches: true,       // parallel hypothesis branches for hard/insane
   autoSubmit:      true,
@@ -89,6 +94,16 @@ let selectedId  = null;
 let settings    = deepClone(DEFAULTS);
 let startTime   = Date.now();
 let queueState  = { running:false, paused:false, cancelled:false };
+let creditState = {
+  challengeId: '',
+  challengeName: '',
+  capUsd: 0,
+  spentUsd: 0,
+  remainingUsd: 0,
+  lowThresholdUsd: 0,
+  low: false,
+  calls: 0,
+};
 
 const CAT_SHORT = {
   'Binary Exploitation':'pwn','Cryptography':'crypto','Forensics':'forensics',
@@ -181,6 +196,11 @@ function applyAll() {
     const rt=g('pb-runtime'); if(rt) rt.textContent='—';
     const rs=g('pb-reasoning'); if(rs){ rs.textContent='off'; rs.style.color=''; }
   }
+  if (!_runtimeInterval && !queueState.running) {
+    resetCreditDisplay();
+  } else {
+    updateCreditDisplay();
+  }
 
   // Open-folder button in platform bar
   const ofBtn = document.getElementById('btn-open-folder');
@@ -211,6 +231,58 @@ function adjustBrightness(hex, pct) {
     const b = Math.max(0, Math.min(255, (n&0xff)+pct));
     return `#${[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('')}`;
   } catch { return hex; }
+}
+
+function _fmtUsd(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '$0.00';
+  return `$${n.toFixed(2)}`;
+}
+
+function updateCreditDisplay() {
+  const el = g('pb-credit');
+  if (!el) return;
+
+  const cap = Number(creditState.capUsd || 0);
+  const spent = Number(creditState.spentUsd || 0);
+  const remaining = Number(creditState.remainingUsd || Math.max(0, cap - spent));
+  const lowThreshold = Number(creditState.lowThresholdUsd || 0);
+
+  if (cap <= 0 && !queueState.running) {
+    el.textContent = '—';
+    el.style.color = '';
+    el.title = 'No active credit telemetry';
+    return;
+  }
+
+  let label = `${_fmtUsd(remaining)} left`;
+  if (cap > 0) {
+    label += ` (${_fmtUsd(spent)}/${_fmtUsd(cap)})`;
+  }
+  if (queueState.running && Number(settings.ctfCreditBudgetUsd || 0) > 0) {
+    const totalCap = Number(settings.ctfCreditBudgetUsd || 0);
+    const totalSpent = Number(queueState.creditSpentUsd || 0);
+    const totalRemain = Math.max(0, Number(queueState.creditRemainingUsd || 0));
+    label += ` | queue ${_fmtUsd(totalRemain)} (${_fmtUsd(totalSpent)}/${_fmtUsd(totalCap)})`;
+  }
+
+  el.textContent = label;
+  el.title = `Low threshold: ${_fmtUsd(lowThreshold)} | Calls: ${Number(creditState.calls || 0)}`;
+  el.style.color = creditState.low ? 'var(--accent)' : 'var(--text-mid)';
+}
+
+function resetCreditDisplay() {
+  creditState = {
+    challengeId: '',
+    challengeName: '',
+    capUsd: 0,
+    spentUsd: 0,
+    remainingUsd: 0,
+    lowThresholdUsd: Number(settings.creditLowThresholdUsd || 0.75),
+    low: false,
+    calls: 0,
+  };
+  updateCreditDisplay();
 }
 
 // ─── Logging ─────────────────────────────────────────────────────────────────
@@ -279,13 +351,7 @@ function renderDetails() {
   if (!selectedId) {
     fill.textContent = '────────────────────────────────────────────────────────────────────';
     if (wsBtn) wsBtn.style.display='none';
-    body.innerHTML = `<div class="empty-state"><pre class="empty-art">
-  ██████╗ ████████╗███████╗
-  ██╔════╝ ╚══██╔══╝██╔════╝
-  ██║         ██║   █████╗
-  ██║         ██║   ██╔══╝
-  ╚██████╗    ██║   ██║
-   ╚═════╝    ╚═╝   ╚═╝</pre><span>select a challenge</span></div>`;
+    body.innerHTML = `<div class="empty-state"><pre class="empty-art">RootHunter</pre><span>select a challenge</span></div>`;
     return;
   }
   const c = ch(selectedId); if (!c) return;
@@ -304,6 +370,9 @@ function renderDetails() {
   const iterRow = c.solveIter
     ? `<div class="det-row"><span class="det-key">iterations</span><span class="det-val">${c.solveIter}</span></div>`
     : '';
+  const creditRow = Number(c.creditSpentUsd||0) > 0
+    ? `<div class="det-row"><span class="det-key">api credit</span><span class="det-val">${_fmtUsd(c.creditSpentUsd)} used${Number(c.creditRemainingUsd||0)>0?` | ${_fmtUsd(c.creditRemainingUsd)} left`:''}</span></div>`
+    : '';
   const attemptsRow = `<div class="det-row"><span class="det-key">attempts</span><span class="det-val">${c.attempts||0}</span></div>`;
   const history = (c.history||[]).slice(-5).reverse();
   const historyBlock = history.length
@@ -316,7 +385,7 @@ function renderDetails() {
     <div class="det-row"><span class="det-key">difficulty</span><span class="det-val">${esc(c.difficulty)}</span></div>
     <div class="det-row"><span class="det-key">points</span><span class="det-val">${c.points}</span></div>
     <div class="det-row"><span class="det-key">status</span><span class="det-val ${sCls}">${c.status.toUpperCase()}${c.status==='solving'?' <span class="spin">◌</span>':''}</span></div>
-    ${runtimeRow}${modelRow}${iterRow}${attemptsRow}
+    ${runtimeRow}${modelRow}${iterRow}${creditRow}${attemptsRow}
     ${c.platform_id?`<div class="det-row"><span class="det-key">platform id</span><span class="det-val v-mid">${esc(c.platform_id)}</span></div>`:''}
     ${c.instance?`<div class="det-row"><span class="det-key">instance</span><span class="det-val">${esc(c.instance)}</span></div>`:''}
     ${c.workspace?`<div class="det-row"><span class="det-key">workspace</span><span class="det-val v-mid" style="font-size:10px">${esc(c.workspace)}</span></div>`:''}
@@ -413,8 +482,20 @@ async function solveCh(c) {
   if (!settings.apiKey)    { addLog('err','No API key — open Settings → API & Engine','red'); return; }
   if (!settings.solverPath){ addLog('err','No solver path — open Settings → Python & Tools','red'); return; }
 
+  if (queueState.running && Number(settings.ctfCreditBudgetUsd || 0) > 0) {
+    if (Number(queueState.creditRemainingUsd || 0) <= 0) {
+      c.status = 'failed';
+      c.lastError = 'Queue credit budget exhausted';
+      addLog('warn', `[CREDIT] Skipping ${c.name}: queue budget exhausted.`);
+      renderList(); if(selectedId===c.id) renderDetails(); updateStats();
+      return;
+    }
+  }
+
   c.attempts = (c.attempts || 0) + 1;
   c.lastError = '';
+  c.creditSpentUsd = 0;
+  c.creditRemainingUsd = 0;
   if (!Array.isArray(c.history)) c.history = [];
 
   c.status='solving'; c.flag=null; c.runtime=null; c.solveModel=null; c.solveIter=null;
@@ -432,6 +513,24 @@ async function solveCh(c) {
   _startRuntimeTimer(c);
   addLog('sys',`━━━ Solving: [${c.category}] ${c.name} ━━━`,'bright');
   addLog('sys',`Budget: auto (score-guided) | Parallel branches: ${settings.parallelBranches?'on':'off'}`,'dim');
+
+  const configuredChallengeCap = Math.max(0.25, Number(settings.creditBudgetUsd || DEFAULTS.creditBudgetUsd));
+  const queueCapEnabled = queueState.running && Number(settings.ctfCreditBudgetUsd || 0) > 0;
+  const queueRemainingCap = queueCapEnabled
+    ? Math.max(0.0, Number(queueState.creditRemainingUsd || 0))
+    : configuredChallengeCap;
+  const effectiveCreditCap = Math.max(0.25, Math.min(configuredChallengeCap, queueRemainingCap));
+
+  creditState.challengeId = c.id;
+  creditState.challengeName = c.name;
+  creditState.capUsd = effectiveCreditCap;
+  creditState.spentUsd = 0;
+  creditState.remainingUsd = effectiveCreditCap;
+  creditState.lowThresholdUsd = Math.max(0.05, Number(settings.creditLowThresholdUsd || DEFAULTS.creditLowThresholdUsd));
+  creditState.low = false;
+  creditState.calls = 0;
+  updateCreditDisplay();
+  addLog('sys', `[CREDIT] cap=${_fmtUsd(effectiveCreditCap)} | low-threshold=${_fmtUsd(creditState.lowThresholdUsd)}${queueCapEnabled ? ` | queue-left=${_fmtUsd(queueRemainingCap)}` : ''}`, 'dim');
 
   let solveErr = '';
 
@@ -465,6 +564,10 @@ async function solveCh(c) {
         writeupStyle:     settings.writeupStyle,
         extraInstructions:settings.extraInstructions,
         parallelBranches: settings.parallelBranches,
+        creditBudgetUsd: effectiveCreditCap,
+        lowCreditThresholdUsd: creditState.lowThresholdUsd,
+        enforceCreditBudget: settings.enforceCreditBudget !== false,
+        conservativeCredits: settings.conservativeCredits !== false,
         hints: {
           'Binary Exploitation': settings.hintPwn,
           'Cryptography':        settings.hintCrypto,
@@ -493,6 +596,19 @@ async function solveCh(c) {
   const elapsed = Math.round((Date.now()-_solveStartTime)/1000);
   _stopRuntimeTimer(elapsed);
   c.runtime = c.runtime || elapsed;
+
+  if (queueState.running && Number(settings.ctfCreditBudgetUsd || 0) > 0) {
+    const spend = Math.max(0, Number(c.creditSpentUsd || creditState.spentUsd || 0));
+    queueState.creditSpentUsd = Number(queueState.creditSpentUsd || 0) + spend;
+    queueState.creditRemainingUsd = Math.max(0, Number(settings.ctfCreditBudgetUsd || 0) - Number(queueState.creditSpentUsd || 0));
+    if (queueState.creditRemainingUsd <= 0) {
+      queueState.cancelled = true;
+      addLog('warn', '[CREDIT] Queue budget exhausted; stopping Solve All.');
+    } else if (queueState.creditRemainingUsd <= Math.max(0.05, Number(settings.creditLowThresholdUsd || 0.75))) {
+      addLog('warn', `[CREDIT] Queue budget low: ${_fmtUsd(queueState.creditRemainingUsd)} left.`);
+    }
+    updateCreditDisplay();
+  }
 
   addLog('sys',`━━━ Done: ${c.name} → ${c.status.toUpperCase()} | ${elapsed}s ━━━`,
     c.status==='solved'?'white':c.status==='failed'?'red':'');
@@ -686,10 +802,20 @@ const App = {
     queueState.running = true;
     queueState.paused = false;
     queueState.cancelled = false;
+    queueState.creditSpentUsd = 0;
+    queueState.creditRemainingUsd = Number(settings.ctfCreditBudgetUsd || 0);
+    if (Number(settings.ctfCreditBudgetUsd || 0) > 0) {
+      addLog('sys', `[CREDIT] Solve All budget set to ${_fmtUsd(settings.ctfCreditBudgetUsd)} total.`, 'bright');
+    }
+    updateCreditDisplay();
 
     const concur = Number(settings.concurrent)||1;
     for(let i=0;i<queue.length;i+=concur) {
       if (queueState.cancelled) break;
+      if (Number(settings.ctfCreditBudgetUsd || 0) > 0 && Number(queueState.creditRemainingUsd || 0) <= 0) {
+        queueState.cancelled = true;
+        break;
+      }
       while (queueState.paused && !queueState.cancelled) {
         await sleep(250);
       }
@@ -702,6 +828,7 @@ const App = {
     queueState.paused = false;
     const msg = queueState.cancelled ? 'Queue cancelled.' : 'Queue complete.';
     queueState.cancelled = false;
+    updateCreditDisplay();
     addLog('sys', msg, 'bright');
   },
 
@@ -843,6 +970,11 @@ const App = {
     sv('s-model-custom', settings.modelCustom);
     sv('s-maxiter',   settings.maxIter);
     sv('s-maxtokens', settings.maxTokens);
+    sv('s-credit-budget', settings.creditBudgetUsd ?? DEFAULTS.creditBudgetUsd);
+    sv('s-ctf-credit-budget', settings.ctfCreditBudgetUsd ?? DEFAULTS.ctfCreditBudgetUsd);
+    sv('s-credit-low-threshold', settings.creditLowThresholdUsd ?? DEFAULTS.creditLowThresholdUsd);
+    sc('s-credit-enforce', settings.enforceCreditBudget !== false);
+    sc('s-credit-conservative', settings.conservativeCredits !== false);
     sv('s-concurrent',settings.concurrent);
     sc('s-auto-submit',   settings.autoSubmit);
     sc('s-auto-writeup',  settings.autoWriteup);
@@ -955,6 +1087,11 @@ const App = {
     settings.modelCustom  = gv('s-model-custom').trim();
     settings.maxIter      = parseInt(gv('s-maxiter'))||20;
     settings.maxTokens    = parseInt(gv('s-maxtokens'))||4096;
+    settings.creditBudgetUsd = Math.max(0.25, Number(gv('s-credit-budget')) || DEFAULTS.creditBudgetUsd);
+    settings.ctfCreditBudgetUsd = Math.max(0, Number(gv('s-ctf-credit-budget')) || 0);
+    settings.creditLowThresholdUsd = Math.max(0.05, Number(gv('s-credit-low-threshold')) || DEFAULTS.creditLowThresholdUsd);
+    settings.enforceCreditBudget = gc('s-credit-enforce');
+    settings.conservativeCredits = gc('s-credit-conservative');
     settings.concurrent   = parseInt(gv('s-concurrent'))||1;
     settings.autoSubmit   = gc('s-auto-submit');
     settings.autoWriteup  = gc('s-auto-writeup');
@@ -1769,6 +1906,34 @@ listen('solver-log', event => {
     const ibEl=g('pb-iter');
     if(ibEl) ibEl.textContent=`0/${e.budget||'auto'}`;
     addLog('sys',`[ENGINE] Budget: ${e.budget||'auto'} iters | Tools: ${e.tools||'?'}`, 'dim');
+
+  } else if(e.type==='credit_status') {
+    const cid = e.challenge_id || selectedId || '';
+    const c = cid ? ch(cid) : ch(selectedId);
+    if (c) {
+      c.creditSpentUsd = Number(e.spent_usd || c.creditSpentUsd || 0);
+      c.creditRemainingUsd = Number(e.remaining_usd || c.creditRemainingUsd || 0);
+      if (selectedId === c.id) renderDetails();
+    }
+
+    creditState.challengeId = cid;
+    creditState.challengeName = e.challenge_name || creditState.challengeName || '';
+    creditState.capUsd = Number(e.cap_usd || creditState.capUsd || 0);
+    creditState.spentUsd = Number(e.spent_usd || creditState.spentUsd || 0);
+    creditState.remainingUsd = Number(e.remaining_usd || Math.max(0, creditState.capUsd - creditState.spentUsd));
+    creditState.lowThresholdUsd = Number(e.low_threshold_usd || creditState.lowThresholdUsd || settings.creditLowThresholdUsd || 0.75);
+    creditState.low = Boolean(e.low || (creditState.remainingUsd <= creditState.lowThresholdUsd));
+    creditState.calls = Number(e.calls || creditState.calls || 0);
+    updateCreditDisplay();
+
+  } else if(e.type==='credit_guard') {
+    if (e.action === 'low_credit') {
+      addLog('warn', `[CREDIT] LOW: ${_fmtUsd(e.remaining_usd||0)} left (threshold ${_fmtUsd(e.low_threshold_usd||settings.creditLowThresholdUsd||0.75)})`, '');
+    } else if (e.action === 'stop') {
+      addLog('warn', `[CREDIT] Guard stop: ${e.reason || 'budget reached'} | spent ${_fmtUsd(e.spent_usd||0)} / ${_fmtUsd(e.cap_usd||0)}`);
+    } else if (e.action === 'throttle') {
+      addLog('sys', `[CREDIT] Throttle ${e.from_model||'?'} → ${e.to_model||'?'} | ${e.from_tokens||'?'} → ${e.to_tokens||'?'} tokens`, 'dim');
+    }
 
   } else if(e.type==='model_switch') {
     // Live model + reasoning indicator in platform bar

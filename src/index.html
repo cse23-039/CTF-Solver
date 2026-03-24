@@ -47,6 +47,9 @@
     <span class="pb-label">iter</span>
     <span class="pb-val" id="pb-iter">—</span>
     <span class="pb-sep">│</span>
+    <span class="pb-label">credit</span>
+    <span class="pb-val" id="pb-credit" title="Live API budget usage">—</span>
+    <span class="pb-sep">│</span>
     <span class="pb-label">runtime</span>
     <span class="pb-val" id="pb-runtime">—</span>
     <span class="pb-sep">│</span>
@@ -116,13 +119,7 @@
         </div>
         <div id="details-body">
           <div class="empty-state">
-            <pre class="empty-art">
-  ██████╗ ████████╗███████╗
-  ██╔════╝ ╚══██╔══╝██╔════╝
-  ██║         ██║   █████╗
-  ██║         ██║   ██╔══╝
-  ╚██████╗    ██║   ██║
-   ╚═════╝    ╚═╝   ╚═╝</pre>
+            <pre class="empty-art">RootHunter</pre>
             <span>select a challenge</span>
           </div>
         </div>
@@ -308,6 +305,37 @@
             <input type="number" class="form-ctrl" id="s-concurrent" value="1" min="1" max="5">
             <div class="hint">How many challenges to solve simultaneously (1 = sequential).</div>
           </div>
+        </div>
+
+        <div class="sg-title">CREDIT GUARD</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">PER-CHALLENGE API BUDGET (USD)</label>
+            <input type="number" class="form-ctrl" id="s-credit-budget" value="5" min="0.25" max="500" step="0.25">
+            <div class="hint">Hard cap for one solve run. Example: 5 = stop around $5 usage for a challenge.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">SOLVE-ALL TOTAL BUDGET (USD)</label>
+            <input type="number" class="form-ctrl" id="s-ctf-credit-budget" value="5" min="0" max="500" step="0.25">
+            <div class="hint">Queue-level cap across all challenges in Solve All. Set 0 to disable global cap.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">LOW CREDIT ALERT THRESHOLD (USD)</label>
+            <input type="number" class="form-ctrl" id="s-credit-low-threshold" value="0.75" min="0.05" max="50" step="0.05">
+            <div class="hint">When remaining budget drops below this, dashboard shows LOW CREDIT in real-time.</div>
+          </div>
+        </div>
+        <div class="toggles-grid" style="margin-top:8px">
+          <label class="toggle-row">
+            <input type="checkbox" id="s-credit-enforce" checked>
+            <span class="toggle-label">Enforce credit budget guard</span>
+            <span class="toggle-hint">Stops solves when estimated API spend reaches your configured budget.</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="s-credit-conservative" checked>
+            <span class="toggle-label">Conservative budget mode</span>
+            <span class="toggle-hint">Prefer cheaper model/tokens early and reduce expensive calls when budget gets tight.</span>
+          </label>
         </div>
 
         <div class="sg-title">AUTOMATION &amp; MULTI-MODEL ROUTING</div>

@@ -82,6 +82,7 @@ body.scanlines::after {
 .pb-sep   { color:var(--border); }
 .pb-val   { color:var(--text-mid); }
 .pb-val.active { color:var(--text-bright); }
+#pb-credit { white-space:nowrap; }
 
 #env-diag-panel {
   background:var(--bg-panel);

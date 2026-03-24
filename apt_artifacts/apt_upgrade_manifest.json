@@ -1,0 +1,42 @@
+[
+  {
+    "op": "deterministic_lab",
+    "result": "Deterministic attack lab generated: C:\\Users\\ksetwaba\\Desktop\\Solver\\ctf-solver\\apt_artifacts\\deterministic_lab.sh"
+  },
+  {
+    "op": "concolic_orchestrate",
+    "result": "Concolic/symbolic orchestration plan generated: C:\\Users\\ksetwaba\\Desktop\\Solver\\ctf-solver\\apt_artifacts\\concolic_plan.json"
+  },
+  {
+    "op": "protocol_learner",
+    "result": "Stateful protocol learner artifact generated: C:\\Users\\ksetwaba\\Desktop\\Solver\\ctf-solver\\apt_artifacts\\protocol_state_machine.json"
+  },
+  {
+    "op": "exploit_compiler",
+    "result": "Exploit candidate compiler output generated: C:\\Users\\ksetwaba\\Desktop\\Solver\\ctf-solver\\apt_artifacts\\exploit_candidates.json (stable=4/4)"
+  },
+  {
+    "op": "intel_layer",
+    "result": "Multi-source intelligence layer policy generated: C:\\Users\\ksetwaba\\Desktop\\Solver\\ctf-solver\\apt_artifacts\\multi_source_intel.json"
+  },
+  {
+    "op": "adaptive_decompose",
+    "result": "Adaptive challenge decomposition graph generated: C:\\Users\\ksetwaba\\Desktop\\Solver\\ctf-solver\\apt_artifacts\\adaptive_decomposition.json"
+  },
+  {
+    "op": "formal_verify",
+    "result": "Formal verifier report generated: C:\\Users\\ksetwaba\\Desktop\\Solver\\ctf-solver\\apt_artifacts\\formal_verifier_report.json (verdict=fail)"
+  },
+  {
+    "op": "red_team_critic",
+    "result": "Self-play red-team critique generated: C:\\Users\\ksetwaba\\Desktop\\Solver\\ctf-solver\\apt_artifacts\\self_play_red_team.md"
+  },
+  {
+    "op": "benchmark_eval",
+    "result": "Benchmark + eval harness generated: C:\\Users\\ksetwaba\\Desktop\\Solver\\ctf-solver\\apt_artifacts\\benchmark_harness.json"
+  },
+  {
+    "op": "side_channel_lab",
+    "result": "Hardware/side-channel module profile generated: C:\\Users\\ksetwaba\\Desktop\\Solver\\ctf-solver\\apt_artifacts\\side_channel_module.json"
+  }
+]
