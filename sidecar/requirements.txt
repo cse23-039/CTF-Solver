@@ -1,0 +1,70 @@
+# CTF::SOLVER — Full requirements
+# System deps: sudo bash install.sh  (run first)
+# Python deps: pip install -r sidecar/requirements.txt
+
+# ── Core ─────────────────────────────────────────────────────────────────────
+anthropic>=0.28.0
+requests>=2.31.0
+urllib3>=2.0.0
+
+# ── Crypto ───────────────────────────────────────────────────────────────────
+pycryptodome>=3.20.0
+cryptography>=41.0.0
+sympy>=1.12
+z3-solver>=4.13.0
+gmpy2>=2.1.0
+hashpumpy
+rsactftool
+
+# ── Binary Exploitation ──────────────────────────────────────────────────────
+pwntools
+ropgadget
+unicorn
+keystone-engine
+randcrack
+paddingoracle
+angr
+
+# ── Reversing ────────────────────────────────────────────────────────────────
+pefile
+flare-floss
+uncompyle6
+frida-tools
+blackboxprotobuf
+
+# ── Web ──────────────────────────────────────────────────────────────────────
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+httpx
+websockets
+websocket-client
+scapy
+jwt-tool
+fuxploider
+sqlmap
+
+# ── Forensics / Image ────────────────────────────────────────────────────────
+Pillow>=10.0.0
+numpy>=1.26.0
+python-magic>=0.4.27
+oletools>=0.60
+pikepdf
+stegcracker
+pyzbar
+peepdf
+volatility3
+regipy
+libscca-python
+
+# ── Network ──────────────────────────────────────────────────────────────────
+paramiko
+scp
+scapy
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+pyyaml>=6.0
+scipy
+basecrack
+chromadb
+playwright
+wasmtime
