@@ -12,6 +12,24 @@ from pathlib import Path
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
+from core import budget as core_budget
+from core import checkpoint as core_checkpoint
+from core import orchestrator as core_orchestrator
+from core import routing as core_routing
+from core import verification as core_verification
+from core.parsing import PromptBuildBuffer, TokenizationCache
+from core.state import BeliefState, SolveState
+from core.tool_runtime import ToolRuntime
+from intelligence import ingest as intel_ingest
+from intelligence import playbooks as intel_playbooks
+from memory import store as memory_store
+from memory.knowledge_graph import KnowledgeGraphStore
+from tools.registry import build_tool_registry, enabled_tools
+
+_TOKEN_CACHE = TokenizationCache(max_size=384)
+_TOOL_RUNTIME = ToolRuntime(timeout_s=45, failure_threshold=3, cooldown_s=50)
+_KG_STORE = KnowledgeGraphStore()
+
 # ─── Platform ────────────────────────────────────────────────────────────────
 IS_WINDOWS = _platform.system() == "Windows"
 
@@ -2934,8 +2952,6 @@ TOOL_MAP = {
     "format_string_exploit":lambda a: tool_format_string_exploit(a.get("binary_path",""),a.get("host",""),a.get("port",0),a.get("operation","find_offset"),a.get("write_addr",""),a.get("write_val",""),a.get("offset",0)),
     "deserialization_exploit":lambda a: tool_deserialization_exploit(a["language"],a.get("operation","list"),a.get("gadget_chain",""),a.get("command","id"),a.get("output_format","base64"),a.get("extra_args","")),
 
-        "deserialization_exploit":lambda a: tool_deserialization_exploit(a["language"],a.get("operation","list"),a.get("gadget_chain",""),a.get("command","id"),a.get("output_format","base64"),a.get("extra_args","")),
-
     # ── 23 new tools ───────────────────────────────────────────────────────────
     "rsa_toolkit":  lambda a: tool_rsa_toolkit(a.get("operation","auto"),a.get("n",""),a.get("e","65537"),a.get("c",""),a.get("p",""),a.get("q",""),a.get("factors"),a.get("moduli"),a.get("output_file","")),
     "cbc_oracle":  lambda a: tool_cbc_oracle(a.get("operation","decrypt"),a.get("target_url",""),a.get("ciphertext_hex",""),a.get("block_size",16),a.get("oracle_param","cipher"),a.get("method","POST"),a.get("encoding","hex"),a.get("headers"),a.get("cookies"),a.get("known_plaintext","")),
@@ -2988,7 +3004,7 @@ def tool_knowledge_get(ctf_name: str) -> str:
     k = _kgkey(ctf_name)
     facts = _ctf_knowledge.get(k, {})
     try:
-        corpus = _load_kg_corpus().get("facts", {}).get(k, {})
+        corpus = _KG_STORE.get_facts(ctf_name)
         if isinstance(corpus, dict):
             facts = {**corpus, **facts}
     except Exception:
@@ -3005,7 +3021,7 @@ def _get_knowledge_injection(ctf_name: str) -> str:
     k = _kgkey(ctf_name)
     facts = _ctf_knowledge.get(k, {})
     try:
-        corpus = _load_kg_corpus().get("facts", {}).get(k, {})
+        corpus = _KG_STORE.get_facts(ctf_name)
         if isinstance(corpus, dict):
             facts = {**corpus, **facts}
     except Exception:
@@ -3781,179 +3797,43 @@ def _estimate_call_cost_usd(model: str, input_tokens: int, output_tokens: int) -
     return round(in_cost + out_cost, 6)
 
 def _init_credit_guard(extra: dict, challenge: dict, max_iterations: int) -> dict:
-    raw_budget = extra.get("creditBudgetUsd", extra.get("apiBudgetUsd", extra.get("budgetUsd", 5.0)))
-    try:
-        cap_usd = float(raw_budget)
-    except Exception:
-        cap_usd = 5.0
-    cap_usd = max(0.25, cap_usd)
-
-    conservative = bool(extra.get("conservativeCredits", True))
-    hard_stop_ratio = float(extra.get("budgetHardStopRatio", 0.98 if conservative else 0.995))
-    reserve_usd = float(extra.get("budgetReserveUsd", 0.75 if conservative else 0.30))
-    low_threshold_usd = float(extra.get("lowCreditThresholdUsd", 0.75 if conservative else 0.50))
-
-    difficulty = str(challenge.get("difficulty", "medium")).lower()
-    per_iter = {
-        "easy": 0.006,
-        "medium": 0.012,
-        "hard": 0.020,
-        "insane": 0.032,
-    }.get(difficulty, 0.012)
-    conservative_cap_iters = max(6, int(cap_usd / max(0.002, per_iter)))
-
-    return {
-        "enabled": bool(extra.get("enforceCreditBudget", True)),
-        "conservative": conservative,
-        "cap_usd": round(cap_usd, 4),
-        "spent_usd": 0.0,
-        "hard_stop_ratio": max(0.85, min(0.999, hard_stop_ratio)),
-        "reserve_usd": max(0.0, reserve_usd),
-        "low_threshold_usd": max(0.05, low_threshold_usd),
-        "max_output_tokens": int(extra.get("maxOutputTokensConservative", 2048 if conservative else 4096)),
-        "max_reasoning_tokens": int(extra.get("maxReasoningTokensConservative", 4000 if conservative else 10000)),
-        "min_remaining_for_opus": float(extra.get("minRemainingUsdForOpus", 1.50 if conservative else 0.50)),
-        "conservative_cap_iters": conservative_cap_iters,
-        "requested_max_iters": max_iterations,
-        "calls": 0,
-        "low_alert_emitted": False,
-        "lock": threading.Lock(),
-    }
+    return core_budget.init_credit_guard(extra, challenge, max_iterations)
 
 def _credit_remaining_usd(guard: dict) -> float:
-    lock = guard.get("lock")
-    if lock:
-        with lock:
-            return max(0.0, float(guard.get("cap_usd", 0.0)) - float(guard.get("spent_usd", 0.0)))
-    return max(0.0, float(guard.get("cap_usd", 0.0)) - float(guard.get("spent_usd", 0.0)))
+    return core_budget.credit_remaining_usd(guard)
 
 def _credit_is_low(guard: dict) -> bool:
-    return _credit_remaining_usd(guard) <= float(guard.get("low_threshold_usd", 0.5))
+    return core_budget.credit_is_low(guard)
 
 def _mark_low_credit_alert_once(guard: dict) -> bool:
-    lock = guard.get("lock")
-    if lock:
-        with lock:
-            if guard.get("low_alert_emitted", False):
-                return False
-            guard["low_alert_emitted"] = True
-            return True
-    if guard.get("low_alert_emitted", False):
-        return False
-    guard["low_alert_emitted"] = True
-    return True
+    return core_budget.mark_low_credit_alert_once(guard)
 
 def _plan_budgeted_call(guard: dict, model: str, requested_max_tokens: int,
                         messages, system: str, use_thinking: bool,
                         thinking_tokens: int) -> dict:
-    if not guard.get("enabled", False):
-        return {
-            "allowed": True,
-            "model": model,
-            "max_tokens": requested_max_tokens,
-            "use_thinking": use_thinking,
-            "thinking_tokens": thinking_tokens,
-            "estimated_cost": 0.0,
-            "input_tokens": 0,
-            "reason": "budget-disabled",
-        }
-
-    remaining = _credit_remaining_usd(guard)
-    reserve = float(guard.get("reserve_usd", 0.0))
-    soft_remaining = max(0.0, remaining - reserve)
-    chosen_model = model
-    chosen_max_tokens = max(256, int(requested_max_tokens))
-    chosen_max_tokens = min(chosen_max_tokens, int(guard.get("max_output_tokens", chosen_max_tokens)))
-
-    if use_thinking:
-        thinking_tokens = min(int(thinking_tokens), int(guard.get("max_reasoning_tokens", thinking_tokens)))
-    chosen_use_thinking = bool(use_thinking)
-    chosen_thinking_tokens = int(thinking_tokens)
-
-    if chosen_model == _MODEL_OPUS and remaining < float(guard.get("min_remaining_for_opus", 1.5)):
-        chosen_model = _MODEL_SONNET
-        chosen_use_thinking = False
-        chosen_thinking_tokens = 0
-
-    input_tokens = _estimate_input_tokens(messages, system)
-    est_cost = _estimate_call_cost_usd(chosen_model, input_tokens, chosen_max_tokens + chosen_thinking_tokens)
-
-    if soft_remaining > 0 and est_cost > soft_remaining:
-        shrink_ratio = max(0.20, min(1.0, soft_remaining / max(est_cost, 1e-6)))
-        chosen_max_tokens = max(256, int(chosen_max_tokens * shrink_ratio))
-        est_cost = _estimate_call_cost_usd(chosen_model, input_tokens, chosen_max_tokens + chosen_thinking_tokens)
-
-    if est_cost > soft_remaining and chosen_model == _MODEL_OPUS:
-        chosen_model = _MODEL_SONNET
-        chosen_use_thinking = False
-        chosen_thinking_tokens = 0
-        est_cost = _estimate_call_cost_usd(chosen_model, input_tokens, chosen_max_tokens)
-
-    if est_cost > soft_remaining and chosen_model == _MODEL_SONNET and guard.get("conservative", False):
-        chosen_model = _MODEL_HAIKU
-        chosen_use_thinking = False
-        chosen_thinking_tokens = 0
-        chosen_max_tokens = max(256, min(chosen_max_tokens, 1200))
-        est_cost = _estimate_call_cost_usd(chosen_model, input_tokens, chosen_max_tokens)
-
-    if (remaining <= 0.0) or (soft_remaining <= 0.0 and guard.get("conservative", False)):
-        return {
-            "allowed": False,
-            "reason": "no_remaining_budget",
-            "model": chosen_model,
-            "max_tokens": chosen_max_tokens,
-            "use_thinking": chosen_use_thinking,
-            "thinking_tokens": chosen_thinking_tokens,
-            "estimated_cost": est_cost,
-            "input_tokens": input_tokens,
-        }
-
-    if est_cost > max(soft_remaining, remaining * 0.95):
-        return {
-            "allowed": False,
-            "reason": "estimated_call_exceeds_budget",
-            "model": chosen_model,
-            "max_tokens": chosen_max_tokens,
-            "use_thinking": chosen_use_thinking,
-            "thinking_tokens": chosen_thinking_tokens,
-            "estimated_cost": est_cost,
-            "input_tokens": input_tokens,
-        }
-
-    return {
-        "allowed": True,
-        "reason": "ok",
-        "model": chosen_model,
-        "max_tokens": chosen_max_tokens,
-        "use_thinking": chosen_use_thinking,
-        "thinking_tokens": chosen_thinking_tokens,
-        "estimated_cost": est_cost,
-        "input_tokens": input_tokens,
-    }
+    return core_budget.plan_budgeted_call(
+        guard=guard,
+        model=model,
+        requested_max_tokens=requested_max_tokens,
+        messages=messages,
+        system=system,
+        use_thinking=use_thinking,
+        thinking_tokens=thinking_tokens,
+        estimate_input_tokens=lambda m, s: _TOKEN_CACHE.estimate(m, s, _estimate_input_tokens),
+        estimate_call_cost=_estimate_call_cost_usd,
+        model_opus=_MODEL_OPUS,
+        model_sonnet=_MODEL_SONNET,
+        model_haiku=_MODEL_HAIKU,
+    )
 
 def _record_credit_usage(guard: dict, model: str, usage, fallback_estimated_cost: float = 0.0) -> float:
-    if not guard.get("enabled", False):
-        return 0.0
-    actual_cost = 0.0
-    try:
-        in_tok = int(getattr(usage, "input_tokens", 0) or 0)
-        out_tok = int(getattr(usage, "output_tokens", 0) or 0)
-        if in_tok > 0 or out_tok > 0:
-            actual_cost = _estimate_call_cost_usd(model, in_tok, out_tok)
-        else:
-            actual_cost = max(0.0, float(fallback_estimated_cost))
-    except Exception:
-        actual_cost = max(0.0, float(fallback_estimated_cost))
-
-    lock = guard.get("lock")
-    if lock:
-        with lock:
-            guard["spent_usd"] = round(float(guard.get("spent_usd", 0.0)) + actual_cost, 6)
-            guard["calls"] = int(guard.get("calls", 0)) + 1
-    else:
-        guard["spent_usd"] = round(float(guard.get("spent_usd", 0.0)) + actual_cost, 6)
-        guard["calls"] = int(guard.get("calls", 0)) + 1
-    return actual_cost
+    return core_budget.record_credit_usage(
+        guard=guard,
+        model=model,
+        usage=usage,
+        estimate_call_cost=_estimate_call_cost_usd,
+        fallback_estimated_cost=fallback_estimated_cost,
+    )
 
 def _select_model(category: str, difficulty: str, iteration: int,
                   total_iters: int, user_model: str) -> tuple[str, bool, int]:
@@ -3992,177 +3872,28 @@ def _select_model(category: str, difficulty: str, iteration: int,
     return _MODEL_SONNET, False, 0
 
 def _memory_v2_path() -> str:
-    return os.path.expanduser("~/.ctf-solver/challenge_memory_v2.jsonl")
+    return memory_store.memory_v2_path()
 
 def _tokenize_simple(text: str) -> set[str]:
-    return set(re.findall(r"[a-zA-Z0-9_]{3,}", (text or "").lower()))
+    return memory_store.tokenize_simple(text)
 
 def _challenge_fingerprint(challenge: dict, ctf_name: str = "") -> str:
-    raw = "|".join([
-        (ctf_name or "").strip().lower(),
-        str(challenge.get("category", "")).strip().lower(),
-        str(challenge.get("name", "")).strip().lower(),
-        str(challenge.get("description", ""))[:2000].strip().lower(),
-    ])
-    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:20]
+    return memory_store.challenge_fingerprint(challenge, ctf_name)
 
 def _load_memory_v2(limit: int = 800) -> list[dict]:
-    path = _memory_v2_path()
-    if not os.path.exists(path):
-        return []
-    rows = []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except Exception:
-                    continue
-    except Exception:
-        return []
-    return rows[-limit:]
+    return memory_store.load_memory_v2(limit=limit)
 
 def _build_memory_injection(memory_hits: list[dict]) -> str:
-    if not memory_hits:
-        return ""
-    lines = ["## Retrieved prior challenge memory (high similarity):"]
-    for i, rec in enumerate(memory_hits[:3], 1):
-        trust = float(rec.get("_memory_trust", 0.0))
-        sim = float(rec.get("_memory_similarity", 0.0))
-        lines.append(
-            f"{i}. [{rec.get('ctf_name','?')}] {rec.get('challenge_name','?')} "
-            f"({rec.get('category','?')}) | trust={trust:.2f} sim={sim:.2f}"
-        )
-        if rec.get("winning_path"):
-            lines.append(f"   Winning path: {str(rec.get('winning_path'))[:220]}")
-        if rec.get("dead_ends"):
-            dead = rec.get("dead_ends")
-            dead_text = ", ".join(dead[:3]) if isinstance(dead, list) else str(dead)
-            lines.append(f"   Dead ends to avoid: {dead_text[:220]}")
-        if rec.get("tool_sequence"):
-            seq = rec.get("tool_sequence")
-            seq_text = " -> ".join(seq[:8]) if isinstance(seq, list) else str(seq)
-            lines.append(f"   Tool chain: {seq_text[:220]}")
-    lines.append("Use this as prior evidence, but verify with fresh tool outputs.")
-    return "\n".join(lines)
+    return memory_store.build_memory_injection(memory_hits)
 
 def _memory_trust_score(rec: dict, ctf_name: str = "", category: str = "", query_fingerprint: str = "") -> float:
-    score = 0.45
-    validator = rec.get("validator") if isinstance(rec.get("validator"), dict) else {}
-    val_conf = float(validator.get("confidence", 0.0) or 0.0)
-    if validator.get("verdict") == "pass":
-        score += 0.18
-    score += min(0.20, max(0.0, val_conf * 0.20))
-
-    if rec.get("winning_path"):
-        score += 0.08
-    if rec.get("tool_sequence"):
-        score += 0.06
-    if rec.get("dead_ends"):
-        score -= 0.05
-
-    if ctf_name and str(rec.get("ctf_name", "")).strip().lower() == ctf_name.strip().lower():
-        score += 0.08
-    if category and str(rec.get("category", "")).strip().lower() == category.strip().lower():
-        score += 0.05
-    if query_fingerprint and str(rec.get("fingerprint", "")) == query_fingerprint:
-        score += 0.10
-
-    ts = int(rec.get("timestamp", 0) or 0)
-    if ts > 0:
-        age_days = max(0.0, (time.time() - ts) / 86400.0)
-        decay = min(0.20, age_days * 0.0025)
-        score -= decay
-
-    return max(0.0, min(1.0, score))
+    return memory_store.memory_trust_score(rec, ctf_name=ctf_name, category=category, query_fingerprint=query_fingerprint)
 
 def _analyze_memory_consistency(memory_hits: list[dict]) -> dict:
-    if not memory_hits:
-        return {
-            "trusted_hits": [],
-            "contradictions": [],
-            "average_trust": 0.0,
-            "summary": "No memory hits available",
-            "guidance": "Proceed evidence-first with fresh recon.",
-        }
-
-    trusts = [float(h.get("_memory_trust", 0.0)) for h in memory_hits]
-    average_trust = sum(trusts) / max(1, len(trusts))
-    trusted_hits = [h for h in memory_hits if float(h.get("_memory_trust", 0.0)) >= 0.55]
-
-    contradictions = []
-    prefixes = {str(h.get("flag_prefix", "")).strip() for h in memory_hits if str(h.get("flag_prefix", "")).strip()}
-    if len(prefixes) > 1:
-        contradictions.append("multiple_flag_prefixes")
-
-    top_tools = set()
-    for rec in memory_hits[:4]:
-        seq = rec.get("tool_sequence")
-        if isinstance(seq, list) and seq:
-            top_tools.add(str(seq[0]))
-    if len(top_tools) >= 3 and len(memory_hits) <= 4:
-        contradictions.append("divergent_opening_toolchains")
-
-    summary = (
-        f"memory_hits={len(memory_hits)} trusted={len(trusted_hits)} avg_trust={average_trust:.2f} "
-        f"contradictions={len(contradictions)}"
-    )
-    guidance = (
-        "Prefer top trusted memory paths as priors."
-        if not contradictions else
-        "Memory contains contradictory priors — use only high-trust records and re-verify every claim with tool output."
-    )
-    return {
-        "trusted_hits": trusted_hits,
-        "contradictions": contradictions,
-        "average_trust": average_trust,
-        "summary": summary,
-        "guidance": guidance,
-    }
+    return memory_store.analyze_memory_consistency(memory_hits)
 
 def _retrieve_memory_v2(challenge: dict, ctf_name: str = "", top_k: int = 3) -> list[dict]:
-    query = " ".join([
-        str(challenge.get("name", "")),
-        str(challenge.get("category", "")),
-        str(challenge.get("description", ""))[:2500],
-    ])
-    qtok = _tokenize_simple(query)
-    if not qtok:
-        return []
-
-    rows = _load_memory_v2()
-    scored = []
-    category = str(challenge.get("category", "")).strip()
-    query_fp = _challenge_fingerprint(challenge, ctf_name)
-    for rec in rows:
-        doc = " ".join([
-            str(rec.get("challenge_name", "")),
-            str(rec.get("category", "")),
-            str(rec.get("ctf_name", "")),
-            str(rec.get("summary", "")),
-            str(rec.get("winning_path", "")),
-        ])
-        rtok = _tokenize_simple(doc)
-        if not rtok:
-            continue
-        overlap = len(qtok & rtok)
-        if overlap == 0:
-            continue
-        ctf_bonus = 3 if ctf_name and rec.get("ctf_name", "").strip().lower() == ctf_name.strip().lower() else 0
-        similarity = overlap / max(1, len(qtok))
-        trust = _memory_trust_score(rec, ctf_name=ctf_name, category=category, query_fingerprint=query_fp)
-        score = (overlap + ctf_bonus) + (trust * 6.0)
-        rec2 = dict(rec)
-        rec2["_memory_similarity"] = round(similarity, 4)
-        rec2["_memory_trust"] = round(trust, 4)
-        rec2["_memory_score"] = round(score, 4)
-        scored.append((score, rec2))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [x[1] for x in scored[:max(1, top_k)]]
+    return memory_store.retrieve_memory_v2(challenge, ctf_name=ctf_name, top_k=top_k)
 
 _NETWORK_TOOLS = {
     "http_request", "download_file", "submit_flag", "browser_agent", "web_crawl", "sqlmap", "ffuf",
@@ -4232,112 +3963,16 @@ def _normalize_category_key(category: str) -> str:
     return cat
 
 def _build_attack_playbook(category: str, difficulty: str, phase: str, multimodal: dict | None = None) -> dict:
-    key = _normalize_category_key(category)
-    pb = _STRATEGY_PLAYBOOKS.get(key, {
-        "entry": "recon -> hypothesis -> evidence -> exploit -> verify",
-        "decision_tree": ["Use evidence-driven pivots and avoid repeating failed paths."],
-        "tools": ["pre_solve_recon", "rank_hypotheses", "execute_python"],
-    })
-    diff = str(difficulty or "medium").lower()
-    intensity = {"easy": "lean", "medium": "balanced", "hard": "deep", "insane": "max"}.get(diff, "balanced")
-    mm_modalities = (multimodal or {}).get("modalities", [])
-    return {
-        "category": key,
-        "phase": phase,
-        "difficulty": diff,
-        "intensity": intensity,
-        "entry": pb.get("entry", ""),
-        "decision_tree": pb.get("decision_tree", [])[:6],
-        "tools": pb.get("tools", [])[:8],
-        "modalities": mm_modalities,
-    }
+    return intel_playbooks.build_attack_playbook(category, difficulty, phase, multimodal)
 
 def _render_playbook_for_prompt(playbook: dict) -> str:
-    if not playbook:
-        return ""
-    lines = [
-        "## Attack Strategy Library (Playbook)",
-        f"Category profile: {playbook.get('category','general')} | intensity={playbook.get('intensity','balanced')} | phase={playbook.get('phase','recon')}",
-        f"Entry flow: {playbook.get('entry','recon -> exploit -> verify')}",
-        "Decision tree:",
-    ]
-    for idx, node in enumerate(playbook.get("decision_tree", [])[:6], 1):
-        lines.append(f"{idx}. {node}")
-    tools = playbook.get("tools", [])
-    if tools:
-        lines.append(f"Preferred tool chain: {', '.join(tools)}")
-    if playbook.get("modalities"):
-        lines.append(f"Multimodal priors: {', '.join(playbook.get('modalities', []))}")
-    return "\n".join(lines)
+    return intel_playbooks.render_playbook_for_prompt(playbook)
 
 def _build_multimodal_feature_pack(challenge: dict, files_blob: str, extra: dict) -> dict:
-    text = str(files_blob or "")
-    attachments = challenge.get("attachments") if isinstance(challenge.get("attachments"), list) else []
-    headers = re.findall(r"\[\[attachment:([^\]]+)\]\]", text)
-    descriptors = attachments if attachments else []
-
-    modalities = set()
-    feature_bag = {
-        "binary": [],
-        "network": [],
-        "image": [],
-        "doc": [],
-        "archive": [],
-        "source": [],
-    }
-
-    def _classify_name(name: str, ftype: str = ""):
-        raw = f"{name} {ftype}".lower()
-        if re.search(r"\.(elf|exe|dll|so|bin)$", raw):
-            modalities.add("binary")
-            feature_bag["binary"].append(name)
-        elif re.search(r"\.(pcap|pcapng)$", raw):
-            modalities.add("network")
-            feature_bag["network"].append(name)
-        elif re.search(r"\.(png|jpg|jpeg|gif|bmp|webp|tiff)$", raw):
-            modalities.add("image")
-            feature_bag["image"].append(name)
-        elif re.search(r"\.(pdf|doc|docx|rtf|odt)$", raw):
-            modalities.add("doc")
-            feature_bag["doc"].append(name)
-        elif re.search(r"\.(zip|tar|gz|7z|rar)$", raw):
-            modalities.add("archive")
-            feature_bag["archive"].append(name)
-        elif re.search(r"\.(py|js|ts|java|go|rs|c|cpp|h|php|html|css|json|yaml|yml|xml)$", raw):
-            modalities.add("source")
-            feature_bag["source"].append(name)
-
-    for h in headers:
-        _classify_name(h)
-    for a in descriptors:
-        if isinstance(a, dict):
-            _classify_name(str(a.get("name", "")), str(a.get("type", "")))
-
-    lower_text = text.lower()
-    if any(x in lower_text for x in ("png", "jpeg", "exif", "steg")): modalities.add("image")
-    if any(x in lower_text for x in ("pcap", "http/1.1", "dns", "tcp stream")): modalities.add("network")
-    if any(x in lower_text for x in ("elf", "checksec", "rop", "libc")): modalities.add("binary")
-
-    summary = {
-        "modalities": sorted(modalities),
-        "feature_bag": {k: v[:10] for k, v in feature_bag.items() if v},
-        "attachment_count": len(headers) if headers else len(descriptors),
-        "ingest_mode": "native_structured",
-        "planner_hint": "Prioritize modality-specific tools before generic brute-force.",
-    }
-    return summary
+    return intel_ingest.build_multimodal_feature_pack(challenge, files_blob, extra)
 
 def _render_multimodal_for_prompt(pack: dict) -> str:
-    if not pack:
-        return ""
-    lines = ["## Multimodal Ingest", f"Modalities: {', '.join(pack.get('modalities', [])) or 'text-only'}"]
-    fb = pack.get("feature_bag", {}) if isinstance(pack.get("feature_bag"), dict) else {}
-    for key in ("binary", "network", "image", "doc", "archive", "source"):
-        vals = fb.get(key, [])
-        if vals:
-            lines.append(f"- {key}: {', '.join(vals[:6])}")
-    lines.append(f"Planner hint: {pack.get('planner_hint','')}")
-    return "\n".join(lines)
+    return intel_ingest.render_multimodal_for_prompt(pack)
 
 def _validator_agent_secondary(candidate_flag: str, evidence_excerpt: str, api_key: str = "") -> dict:
     fallback = {
@@ -4391,89 +4026,29 @@ def _reproducibility_check(candidate_flag: str, evidence_log: list[dict], solve_
 
 def _run_self_verification(candidate_flag: str, conversation_summary: str, ctf_name: str, category: str,
                            evidence_log: list[dict], solve_log: list[str], api_key: str = "") -> dict:
-    primary = _validate_candidate_flag(
-        conversation_summary=conversation_summary,
+    return core_verification.run_self_verification(
         candidate_flag=candidate_flag,
+        conversation_summary=conversation_summary,
         ctf_name=ctf_name,
         category=category,
+        evidence_log=evidence_log,
+        solve_log=solve_log,
+        validate_candidate_flag=_validate_candidate_flag,
+        model_haiku=_MODEL_HAIKU,
         api_key=api_key,
     )
-    repro = _reproducibility_check(candidate_flag, evidence_log, solve_log)
-    secondary = _validator_agent_secondary(candidate_flag, "\n".join(solve_log[-10:]), api_key=api_key)
-
-    votes = [primary.get("verdict") == "pass", repro.get("verdict") == "pass", secondary.get("verdict") == "pass"]
-    score = (
-        float(primary.get("confidence", 0.0)) * 0.45 +
-        float(repro.get("confidence", 0.0)) * 0.30 +
-        float(secondary.get("confidence", 0.0)) * 0.25
-    )
-    verdict = "pass" if (sum(1 for v in votes if v) >= 2 and score >= 0.58) else "fail"
-    return {
-        "verdict": verdict,
-        "confidence": round(score, 3),
-        "reason": f"votes={sum(1 for v in votes if v)}/3",
-        "agents": {"primary": primary, "secondary": secondary, "repro": repro},
-    }
 
 def _kg_corpus_path() -> str:
-    return os.path.expanduser("~/.ctf-solver/knowledge_corpus.json")
-
-def _load_kg_corpus() -> dict:
-    path = _kg_corpus_path()
-    if not os.path.exists(path):
-        return {"nodes": [], "edges": [], "facts": {}}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            data.setdefault("nodes", [])
-            data.setdefault("edges", [])
-            data.setdefault("facts", {})
-            return data
-    except Exception:
-        pass
-    return {"nodes": [], "edges": [], "facts": {}}
-
-def _save_kg_corpus(data: dict) -> None:
-    path = _kg_corpus_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    return _KG_STORE.db_path
 
 def _kg_upsert_fact(ctf_name: str, key: str, value: str) -> None:
-    corpus = _load_kg_corpus()
-    k = _kgkey(ctf_name)
-    facts = corpus.setdefault("facts", {})
-    bucket = facts.setdefault(k, {})
-    bucket[key] = value
-    nodes = corpus.setdefault("nodes", [])
-    edges = corpus.setdefault("edges", [])
-    ctf_node = f"ctf:{k}"
-    key_node = f"fact:{k}:{key}"
-    if ctf_node not in nodes: nodes.append(ctf_node)
-    if key_node not in nodes: nodes.append(key_node)
-    edges.append({"from": ctf_node, "to": key_node, "rel": "has_fact", "ts": int(time.time())})
-    _save_kg_corpus(corpus)
+    _KG_STORE.upsert_fact(ctf_name, key, value)
 
 def _kg_query_context(ctf_name: str, query_terms: set[str], max_items: int = 8) -> list[str]:
-    corpus = _load_kg_corpus()
-    facts = corpus.get("facts", {})
-    k = _kgkey(ctf_name)
-    local = facts.get(k, {}) if isinstance(facts, dict) else {}
-    out = []
-    for fk, fv in local.items():
-        txt = f"{fk} {fv}".lower()
-        overlap = len(query_terms & _tokenize_simple(txt)) if query_terms else 1
-        if overlap > 0:
-            out.append((overlap, f"{fk}: {str(fv)[:200]}"))
-    out.sort(key=lambda x: x[0], reverse=True)
-    return [v for _, v in out[:max_items]]
+    return _KG_STORE.query_context(ctf_name, query_terms, max_items=max_items)
 
 def _compute_expected_value_score(challenge: dict) -> float:
-    diff = str(challenge.get("difficulty", "medium")).lower()
-    pts = float(challenge.get("points", 100) or 100)
-    diff_mult = {"easy": 1.2, "medium": 1.0, "hard": 0.82, "insane": 0.62}.get(diff, 1.0)
-    return round((pts * diff_mult) / 100.0, 4)
+    return core_routing.compute_expected_value_score(challenge)
 
 def _run_exploit_dev_automation(category: str, challenge_ctx: dict, workspace: str, extra: dict) -> dict:
     cat = _normalize_category_key(category)
@@ -4568,10 +4143,7 @@ def run_benchmark(payload: dict):
     print(json.dumps(summary, ensure_ascii=False), flush=True)
 
 def _store_memory_v2(record: dict) -> None:
-    path = _memory_v2_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    memory_store.store_memory_v2(record)
 
 def _evidence_log_path(workspace: str = "") -> str:
     if workspace:
@@ -4631,134 +4203,35 @@ def _run_self_healing_preflight(category: str) -> dict:
 
 def _decide_strategy_mode(category: str, phase: str, fruitless: int, tool_failures: int,
                           iteration: int, total_iters: int, memory_diag: dict) -> dict:
-    cat = (category or "").lower()
-    base_mode = "general-evidence"
-    rec_tools = ["pre_solve_recon", "rank_hypotheses"]
-
-    if "crypto" in cat:
-        base_mode = "symbolic-crypto"
-        rec_tools = ["crypto_attack", "sage_math", "z3_solve", "statistical_analysis"]
-    elif "web" in cat:
-        base_mode = "dynamic-web"
-        rec_tools = ["http_request", "js_analyze", "source_audit", "sql_injection"]
-    elif "reverse" in cat:
-        base_mode = "rev-static-dynamic"
-        rec_tools = ["disassemble", "binary_analysis", "execute_python", "decompile"]
-    elif "binary" in cat or "pwn" in cat:
-        base_mode = "binary-exploit"
-        rec_tools = ["checksec", "binary_analysis", "rop_chain", "execute_python"]
-    elif "forensic" in cat:
-        base_mode = "artifact-forensics"
-        rec_tools = ["forensics", "extract_strings", "pcap_analyze", "steg_analyze"]
-
-    pivot = False
-    reason = ""
-    mode = base_mode
-
-    contradictions = len((memory_diag or {}).get("contradictions", []))
-    if contradictions > 0 and phase in ("recon", "exploit"):
-        mode = "memory-guarded-verification"
-        pivot = True
-        reason = "memory-contradiction"
-    if fruitless >= 3:
-        mode = "diversify-attack-surface"
-        pivot = True
-        reason = reason or "fruitless-iterations"
-    if tool_failures >= 2:
-        mode = "self-heal-fallbacks"
-        pivot = True
-        reason = reason or "tool-failures"
-    if phase == "validate":
-        mode = "validator-evidence-gate"
-        rec_tools = ["formal_verify", "detect_flag_format", "submit_flag"]
-
-    confidence = max(0.05, min(0.99, 1.0 - ((fruitless * 0.08) + (tool_failures * 0.12))))
-    progress_ratio = round(iteration / max(1, total_iters), 3)
-    return {
-        "mode": mode,
-        "base_mode": base_mode,
-        "pivot": pivot,
-        "reason": reason,
-        "recommended_tools": rec_tools,
-        "confidence": round(confidence, 3),
-        "progress_ratio": progress_ratio,
-    }
+    return core_routing.decide_strategy_mode(
+        category=category,
+        phase=phase,
+        fruitless=fruitless,
+        tool_failures=tool_failures,
+        iteration=iteration,
+        total_iters=total_iters,
+        memory_diag=memory_diag,
+    )
 
 def _route_model_v2(category: str, difficulty: str, iteration: int, total_iters: int,
                     user_model: str, fruitless: int, tool_failures: int,
                     progress_gap: int, opus_budget_remaining: int,
                     memory_hits_count: int = 0) -> dict:
-    hard_categories = {"Cryptography", "Reverse Engineering"}
-    diff_score_map = {"easy": 20, "medium": 45, "hard": 70, "insane": 90}
-    complexity = diff_score_map.get((difficulty or "medium").lower(), 45)
-    if category in hard_categories:
-        complexity = min(100, complexity + 12)
-
-    uncertainty = min(100, (fruitless * 10) + (progress_gap * 7) + (12 if memory_hits_count == 0 else 0))
-    failure = min(100, (tool_failures * 18) + (20 if fruitless >= 4 else 0))
-    route_score = int((0.45 * complexity) + (0.30 * uncertainty) + (0.25 * failure))
-
-    reasons = []
-    if complexity >= 80: reasons.append("high-complexity")
-    if uncertainty >= 60: reasons.append("high-uncertainty")
-    if failure >= 50: reasons.append("tool-failures")
-    if memory_hits_count > 0: reasons.append("memory-available")
-
-    # Honor custom/non-standard model IDs directly
-    if user_model not in (_MODEL_SONNET, _MODEL_OPUS, _MODEL_HAIKU, ""):
-        return {
-            "model": user_model,
-            "use_thinking": False,
-            "thinking_tokens": 0,
-            "route_score": route_score,
-            "complexity": complexity,
-            "uncertainty": uncertainty,
-            "failure": failure,
-            "reasons": reasons + ["user-custom-model"],
-        }
-
-    # User-forced Opus
-    if user_model == _MODEL_OPUS:
-        return {
-            "model": _MODEL_OPUS,
-            "use_thinking": True,
-            "thinking_tokens": 10000 if difficulty == "insane" else 8000,
-            "route_score": route_score,
-            "complexity": complexity,
-            "uncertainty": uncertainty,
-            "failure": failure,
-            "reasons": reasons + ["user-forced-opus"],
-        }
-
-    use_opus = False
-    use_thinking = False
-    thinking_tokens = 0
-
-    if opus_budget_remaining > 0 and route_score >= 70:
-        use_opus = True
-        use_thinking = True
-        thinking_tokens = 12000 if difficulty == "insane" else 8000
-        reasons.append("route-score-threshold")
-    elif opus_budget_remaining > 0 and route_score >= 58 and (iteration <= max(2, total_iters // 2)):
-        use_opus = True
-        use_thinking = difficulty in ("hard", "insane")
-        thinking_tokens = 6000 if use_thinking else 0
-        reasons.append("early-iteration-escalation")
-
-    model = _MODEL_OPUS if use_opus else _MODEL_SONNET
-    if not reasons:
-        reasons.append("default-sonnet")
-
-    return {
-        "model": model,
-        "use_thinking": use_thinking,
-        "thinking_tokens": thinking_tokens,
-        "route_score": route_score,
-        "complexity": complexity,
-        "uncertainty": uncertainty,
-        "failure": failure,
-        "reasons": reasons,
-    }
+    return core_routing.route_model_v2(
+        category=category,
+        difficulty=difficulty,
+        iteration=iteration,
+        total_iters=total_iters,
+        user_model=user_model,
+        fruitless=fruitless,
+        tool_failures=tool_failures,
+        progress_gap=progress_gap,
+        opus_budget_remaining=opus_budget_remaining,
+        model_sonnet=_MODEL_SONNET,
+        model_opus=_MODEL_OPUS,
+        model_haiku=_MODEL_HAIKU,
+        memory_hits_count=memory_hits_count,
+    )
 
 def _validate_candidate_flag(conversation_summary: str, candidate_flag: str,
                              ctf_name: str, category: str, api_key: str = "") -> dict:
@@ -5885,7 +5358,7 @@ def run_import(payload):
         log("err",f"Import failed: {e}","red"); emit("import_result",error=str(e))
 
 # ─── Solve mode ──────────────────────────────────────────────────────────────
-def run_solve(payload):
+def _run_solve_impl(payload):
     global _PLATFORM_CONFIG, _solve_start_time, _current_model_display
     _solve_start_time = time.time()
 
@@ -5956,9 +5429,10 @@ def run_solve(payload):
     max_tokens_default = 1800 if credit_guard.get("conservative", False) else 4096
     max_tokens = int(extra.get("maxTokens", max_tokens_default))
 
-    # Enabled tools filter — include all new tools by default
+    # Enabled tools filter via registry
+    registry = build_tool_registry(TOOLS, TOOL_MAP)
     enabled = set(extra.get("enabledTools", list(TOOL_MAP.keys())))
-    active_tools = [t for t in TOOLS if t["name"] in enabled]
+    active_tools = enabled_tools(registry, enabled)
     if human_loop.get("force_local_only", False):
         active_tools = [t for t in active_tools if t.get("name") not in _NETWORK_TOOLS]
         emit("human_loop", action="force_local_only", active_tools=len(active_tools))
@@ -6044,47 +5518,55 @@ def run_solve(payload):
     )
 
     # ── Build base user message ───────────────────────────────────────────────
-    user_msg = f"""Solve this CTF challenge completely.
-
-Challenge: {name}
-Category:  {cat}
-Difficulty:{diff}
-Points:    {pts}
-CTF:       {ctf_name or 'Unknown'}
-"""
-    if ffmt:     user_msg += f"Flag format: {ffmt}\n"
-    if inst:     user_msg += f"Instance:   {inst}\n"
-    if base_dir: user_msg += f"Base dir:   {base_dir}\n"
-    if ws:       user_msg += f"Workspace:  {ws} (already created)\n"
+    pb = PromptBuildBuffer()
+    pb.add("Solve this CTF challenge completely.\n\n")
+    pb.add(f"Challenge: {name}\n")
+    pb.add(f"Category:  {cat}\n")
+    pb.add(f"Difficulty:{diff}\n")
+    pb.add(f"Points:    {pts}\n")
+    pb.add(f"CTF:       {ctf_name or 'Unknown'}\n")
+    if ffmt:
+        pb.add(f"Flag format: {ffmt}\n")
+    if inst:
+        pb.add(f"Instance:   {inst}\n")
+    if base_dir:
+        pb.add(f"Base dir:   {base_dir}\n")
+    if ws:
+        pb.add(f"Workspace:  {ws} (already created)\n")
     elif base_dir and ctf_name:
-        user_msg += f"\nCall create_workspace(base_dir='{base_dir}', ctf_name='{ctf_name}', category='{cat}', challenge_name='{name}')\n"
+        pb.add(f"\nCall create_workspace(base_dir='{base_dir}', ctf_name='{ctf_name}', category='{cat}', challenge_name='{name}')\n")
 
-    user_msg += f"\n## Description\n{desc}\n"
+    pb.add(f"\n## Description\n{desc}\n")
     if signal_summary:
-        user_msg += f"\n## Parsed Challenge Signals\n{signal_summary}\n"
+        pb.add(f"\n## Parsed Challenge Signals\n{signal_summary}\n")
     mm_prompt = _render_multimodal_for_prompt(multimodal_pack)
     if mm_prompt:
-        user_msg += f"\n{mm_prompt}\n"
+        pb.add(f"\n{mm_prompt}\n")
     playbook_prompt = _render_playbook_for_prompt(playbook)
     if playbook_prompt:
-        user_msg += f"\n{playbook_prompt}\n"
+        pb.add(f"\n{playbook_prompt}\n")
     if memory_diag.get("summary"):
-        user_msg += f"\n## Memory Trust/Consistency\n{memory_diag.get('summary')}\n"
-        user_msg += f"Guidance: {memory_diag.get('guidance','')}\n"
+        pb.add(f"\n## Memory Trust/Consistency\n{memory_diag.get('summary')}\n")
+        pb.add(f"Guidance: {memory_diag.get('guidance','')}\n")
     if explicit_hints:
-        user_msg += "\n## Platform/Provided Hints\n"
+        pb.add("\n## Platform/Provided Hints\n")
         for idx, hint_text in enumerate(explicit_hints[:12], 1):
-            user_msg += f"{idx}. {hint_text}\n"
+            pb.add(f"{idx}. {hint_text}\n")
     if name_hints:
-        user_msg += "\n## Name-Derived Clues\n"
+        pb.add("\n## Name-Derived Clues\n")
         for idx, hint_text in enumerate(name_hints[:12], 1):
-            user_msg += f"{idx}. {hint_text}\n"
-    if files: user_msg += f"\n## Challenge Files / Source / Data\n```\n{files[:8000]}\n```\n"
-    if fmt_inject: user_msg += fmt_inject
-    if memory_ctx: user_msg += f"\n{memory_ctx}\n"
-    if knowledge_ctx: user_msg += f"\n{knowledge_ctx}\n"
-    user_msg += "\n**METHODOLOGY**: planner+specialists → hypothesis tree + pruning → tool graph execution → parallel branches → autonomous recon→exploit→refine loop → validator gate → submit_flag → evidence-backed WRITEUP.md"
-    user_msg += "\n\n**CREDIT GUARD (MANDATORY)**: be frugal with API usage; prefer tool-driven/local reasoning first, minimize repeated long outputs, and avoid expensive model escalation unless evidence shows clear expected gain."
+            pb.add(f"{idx}. {hint_text}\n")
+    if files:
+        pb.add(f"\n## Challenge Files / Source / Data\n```\n{files[:8000]}\n```\n")
+    if fmt_inject:
+        pb.add(fmt_inject)
+    if memory_ctx:
+        pb.add(f"\n{memory_ctx}\n")
+    if knowledge_ctx:
+        pb.add(f"\n{knowledge_ctx}\n")
+    pb.add("\n**METHODOLOGY**: planner+specialists → hypothesis tree + pruning → tool graph execution → parallel branches → autonomous recon→exploit→refine loop → validator gate → submit_flag → evidence-backed WRITEUP.md")
+    pb.add("\n\n**CREDIT GUARD (MANDATORY)**: be frugal with API usage; prefer tool-driven/local reasoning first, minimize repeated long outputs, and avoid expensive model escalation unless evidence shows clear expected gain.")
+    user_msg = pb.build()
 
     challenge_ctx = {
         "ctf_name": ctf_name,
@@ -6289,19 +5771,30 @@ CTF:       {ctf_name or 'Unknown'}
 
     # ── Sequential solve loop ────────────────────────────────────────────────
     messages   = [{"role":"user","content":user_msg}]
-    found_flag = None
-    final_ws   = ws
-    solve_log  = []
-    iteration  = 0
-    fruitless  = 0   # iterations since last meaningful progress
-    last_flag_check_iter = 0
-    last_progress_iter = 0
-    tool_failures = 0
+    solve_state = SolveState(
+        iteration=0,
+        max_iterations=max_iterations,
+        fruitless=0,
+        last_progress_iter=0,
+        tool_failures=0,
+        last_flag_check_iter=0,
+        opus_budget_remaining=0,
+        final_workspace=ws,
+    )
+    found_flag = solve_state.found_flag
+    final_ws = solve_state.final_workspace
+    solve_log = solve_state.solve_log
+    iteration = solve_state.iteration
+    fruitless = solve_state.fruitless
+    last_flag_check_iter = solve_state.last_flag_check_iter
+    last_progress_iter = solve_state.last_progress_iter
+    tool_failures = solve_state.tool_failures
     route_history = []
     tool_call_history = []
     pivot_events = []
     strategy_history = []
     opus_budget_remaining = int(extra.get("opusBudget", max(3, max_iterations // 3)))
+    solve_state.opus_budget_remaining = opus_budget_remaining
     if allocator_cfg.get("enabled", True):
         ev = allocator_cfg.get("queue_expected_value", 0.0)
         if ev < 0.6:
@@ -6315,8 +5808,22 @@ CTF:       {ctf_name or 'Unknown'}
     contradiction_penalty = len(memory_diag.get("contradictions", []))
     trusted_memory_hits_count = len(trusted_memory_hits)
 
+    if bool(extra.get("resumeCheckpoint", True)):
+        resume_state = core_checkpoint.load_checkpoint(final_ws or ws or base_dir or os.getcwd(), name)
+        if resume_state:
+            messages = resume_state.get("messages", messages)
+            iteration = int(resume_state.get("iteration", iteration))
+            fruitless = int(resume_state.get("fruitless", fruitless))
+            tool_failures = int(resume_state.get("tool_failures", tool_failures))
+            solve_log = resume_state.get("solve_log", solve_log)
+            evidence_log = resume_state.get("evidence_log", evidence_log)
+            route_history = resume_state.get("route_history", route_history)
+            strategy_history = resume_state.get("strategy_history", strategy_history)
+            emit("checkpoint", action="resumed", iteration=iteration, challenge=name)
+
     while iteration < max_iterations:
         iteration += 1
+        solve_state.iteration = iteration
 
         # ── Multi-model routing ──────────────────────────────────────────────
         progress_gap = (iteration - last_progress_iter if last_progress_iter else iteration) + contradiction_penalty
@@ -6557,7 +6064,23 @@ CTF:       {ctf_name or 'Unknown'}
         tool_results = []
         made_progress = False
 
-        for block in resp.content:
+        ordered_content = list(resp.content)
+        tool_candidates = []
+        for block in ordered_content:
+            if getattr(block, "type", None) == "tool_use":
+                tool_candidates.append({
+                    "name": getattr(block, "name", ""),
+                    "block": block,
+                })
+        if tool_candidates:
+            reliability = _TOOL_RUNTIME.reliability_snapshot()
+            belief_uncertainty = {k: v.uncertainty for k, v in solve_state.beliefs.items()}
+            ranked = core_routing.schedule_tools_by_voi(tool_candidates, strategy, reliability, belief_uncertainty)
+            ranked_blocks = [r["block"] for r in ranked]
+            non_tools = [b for b in ordered_content if getattr(b, "type", None) != "tool_use"]
+            ordered_content = non_tools + ranked_blocks
+
+        for block in ordered_content:
             btype = getattr(block,"type",None)
 
             if btype == "thinking":
@@ -6582,14 +6105,27 @@ CTF:       {ctf_name or 'Unknown'}
                 log("sys",f"→ {tname}({preview[:160]+'...' if len(preview)>160 else preview})","dim")
                 emit("tool_call", tool=tname, iteration=iteration)
 
-                if tname in TOOL_MAP:
-                    try:    tout = TOOL_MAP[tname](tinput)
-                    except Exception as e:
-                        tout = f"Tool error: {type(e).__name__}: {e}"; log("err",tout,"red")
-                        tool_failures += 1
-                else:
-                    tout = f"Unknown tool: {tname}"; log("err",tout,"red")
+                tout, tool_ok, tool_reason = _TOOL_RUNTIME.execute(tname, tinput, TOOL_MAP)
+                if not tool_ok:
+                    log("err", f"{tout} ({tool_reason})", "red")
                     tool_failures += 1
+
+                if tname not in solve_state.beliefs:
+                    solve_state.beliefs[tname] = BeliefState(hypothesis=f"tool:{tname}", uncertainty=0.5)
+                belief = solve_state.beliefs[tname]
+                belief.last_tool = tname
+                belief.evidence_count += 1
+                belief.evidence_score = max(0.0, min(1.0, belief.evidence_score + (0.10 if tool_ok else -0.08)))
+                belief.uncertainty = max(0.05, min(0.95, belief.uncertainty + (-0.10 if tool_ok else 0.12)))
+                emit(
+                    "belief_state",
+                    iteration=iteration,
+                    tool=tname,
+                    uncertainty=round(belief.uncertainty, 3),
+                    evidence_score=round(belief.evidence_score, 3),
+                    evidence_count=belief.evidence_count,
+                    reliability=round(_TOOL_RUNTIME.reliability_snapshot().get(tname, 0.5), 3),
+                )
 
                 # Capture workspace path
                 if tname=="create_workspace" and "Workspace created:" in str(tout):
@@ -6650,12 +6186,18 @@ CTF:       {ctf_name or 'Unknown'}
 
         # ── Progress tracking ────────────────────────────────────────────────
         if made_progress and not found_flag:
-            fruitless = 0
-            last_progress_iter = iteration
-            if tool_failures > 0:
-                tool_failures -= 1
+            solve_state.iteration = iteration
+            solve_state.fruitless = fruitless
+            solve_state.tool_failures = tool_failures
+            solve_state.touch_progress()
+            fruitless = solve_state.fruitless
+            last_progress_iter = solve_state.last_progress_iter
+            tool_failures = solve_state.tool_failures
         elif not found_flag:
-            fruitless += 1
+            solve_state.iteration = iteration
+            solve_state.fruitless = fruitless
+            solve_state.touch_no_progress()
+            fruitless = solve_state.fruitless
 
         # ── Flag found ───────────────────────────────────────────────────────
         if found_flag:
@@ -6757,6 +6299,21 @@ CTF:       {ctf_name or 'Unknown'}
             result("solved",found_flag,workspace=final_ws)
             return
 
+        try:
+            cp_path = core_checkpoint.save_checkpoint(final_ws or ws or base_dir or os.getcwd(), name, {
+                "iteration": iteration,
+                "fruitless": fruitless,
+                "tool_failures": tool_failures,
+                "messages": messages[-30:],
+                "solve_log": solve_log[-40:],
+                "evidence_log": evidence_log[-80:],
+                "route_history": route_history[-40:],
+                "strategy_history": strategy_history[-40:],
+            })
+            emit("checkpoint", action="saved", path=cp_path, iteration=iteration)
+        except Exception as e:
+            log("warn", f"Checkpoint save failed: {e}", "")
+
         # ── Continue or stop ─────────────────────────────────────────────────
         stop=getattr(resp,"stop_reason",None)
         if has_tool and tool_results:
@@ -6773,160 +6330,8 @@ CTF:       {ctf_name or 'Unknown'}
     result("failed",workspace=final_ws)
     return
 
-    _PLATFORM_CONFIG = {**pc,"challenge_id":challenge.get("platform_id","")}
-
-    if not api_key: log("err","No API key","red"); result("failed"); return
-    try: import anthropic
-    except ImportError: log("err","pip install anthropic","red"); result("failed"); return
-
-    client = anthropic.Anthropic(api_key=api_key)
-
-    name    = challenge.get("name","Unknown")
-    cat     = challenge.get("category","Unknown")
-    diff    = challenge.get("difficulty","medium")
-    pts     = challenge.get("points",0)
-    desc    = challenge.get("description","(no description)")
-    files   = challenge.get("files","")
-    inst    = challenge.get("instance","")
-    ffmt    = challenge.get("flagFormat") or challenge.get("flag_format","")
-    ws      = challenge.get("workspace","")
-
-    # Enabled tools filter
-    enabled = set(extra.get("enabledTools", list(TOOL_MAP.keys())))
-    active_tools = [t for t in TOOLS if t["name"] in enabled]
-
-    system = build_system_prompt(pc.get("type","manual"), ctf_name, base_dir, extra)
-
-    log("sys",f"{'Windows+WSL2' if IS_WINDOWS and USE_WSL else 'Windows' if IS_WINDOWS else 'Linux/Mac'} | {model} | {max_iterations} iterations | {len(active_tools)} tools","")
-    log("sys",f"━━━ [{cat}] {name} ({diff}, {pts}pts) ━━━","bright")
-
-    # Build user message
-    user_msg = f"""Solve this CTF challenge completely.
-
-Challenge: {name}
-Category:  {cat}
-Difficulty:{diff}
-Points:    {pts}
-CTF:       {ctf_name or 'Unknown'}
-"""
-    if ffmt:     user_msg += f"Flag format: {ffmt}\n"
-    if inst:     user_msg += f"Instance:   {inst}\n"
-    if base_dir: user_msg += f"Base dir:   {base_dir}\n"
-    if ws:       user_msg += f"Workspace:  {ws} (already created)\n"
-    elif base_dir and ctf_name:
-        user_msg += f"\nCall create_workspace(base_dir='{base_dir}', ctf_name='{ctf_name}', category='{cat}', challenge_name='{name}')\n"
-
-    user_msg += f"\n## Description\n{desc}\n"
-    if files: user_msg += f"\n## Challenge Files / Source / Data\n```\n{files[:8000]}\n```\n"
-
-    user_msg += "\nSolve it. State your hypothesis, execute methodically, find the flag, submit it, write WRITEUP.md."
-
-    messages   = [{"role":"user","content":user_msg}]
-    found_flag = None
-    final_ws   = ws
-    solve_log  = []
-    iteration  = 0
-    max_tokens = int(extra.get("maxTokens",4096))
-
-    # ── Auto-detect flag format before first Claude iteration ────────────────
-    auto_fmt = tool_detect_flag_format(
-        ctf_name=ctf_name,
-        description=desc,
-        platform_type=pc.get("type",""),
-        hint=ffmt or ""
-    )
-    log("sys", f"[FMT] Pre-solve format detection complete", "dim")
-    # Inject detected format prominently into the first user message
-    fmt_summary_match = re.search(r"Prefix:\s+(.+)\n.*Example:\s+(.+)\n.*Confidence:\s+(\S+)", auto_fmt)
-    if fmt_summary_match:
-        fmt_inject = (f"\n## Auto-Detected Flag Format\n"
-                      f"Prefix: {fmt_summary_match.group(1).strip()}\n"
-                      f"Example: {fmt_summary_match.group(2).strip()}\n"
-                      f"Confidence: {fmt_summary_match.group(3).strip()}\n"
-                      f"(Already cached in session — no need to call detect_flag_format manually for format.)\n")
-        messages[0]["content"] = user_msg + fmt_inject
-    # ────────────────────────────────────────────────────────────────────────
-
-    while iteration < max_iterations:
-        iteration += 1
-        log("sys",f"─── Iteration {iteration}/{max_iterations} ──────────────────────────────────────────────","dim")
-
-        try:
-            resp = client.messages.create(
-                model=model, max_tokens=max_tokens,
-                system=system, tools=active_tools, messages=messages
-            )
-        except anthropic.AuthenticationError:
-            log("err","Auth failed — check API key","red"); result("failed"); return
-        except anthropic.RateLimitError:
-            log("err","Rate limit — wait and retry","red"); result("failed"); return
-        except Exception as e:
-            log("err",f"API: {e}","red"); result("failed"); return
-
-        has_tool = False; tool_results = []
-
-        for block in resp.content:
-            btype = getattr(block,"type",None)
-
-            if btype == "text":
-                solve_log.append(block.text)
-                for line in block.text.splitlines():
-                    if line.strip(): log("ai",line.strip(),"")
-                if not found_flag: found_flag = extract_flag(block.text, ctf_name)
-
-            elif btype == "tool_use":
-                has_tool = True
-                tname,tinput,tid = block.name,block.input,block.id
-                preview = json.dumps(tinput)
-                log("sys",f"→ {tname}({preview[:160]+'...' if len(preview)>160 else preview})","dim")
-
-                if tname in TOOL_MAP:
-                    try:    tout = TOOL_MAP[tname](tinput)
-                    except Exception as e:
-                        tout = f"Tool error: {type(e).__name__}: {e}"; log("err",tout,"red")
-                else:
-                    tout = f"Unknown tool: {tname}"; log("err",tout,"red")
-
-                # Capture workspace
-                if tname=="create_workspace" and "Workspace created:" in str(tout):
-                    m=re.search(r"Workspace created: (.+)",str(tout))
-                    if m: final_ws=m.group(1).strip()
-
-                # Log preview
-                pout=str(tout); preview_len=int(extra.get("logPreview",400))
-                if len(pout)>preview_len: pout=pout[:preview_len//2]+"\n...\n"+pout[-preview_len//2:]
-                for line in pout.splitlines():
-                    if line.strip(): log("info",f"  {line.strip()}","")
-
-                if not found_flag: found_flag=extract_flag(str(tout), ctf_name)
-                tool_results.append({"type":"tool_result","tool_use_id":tid,"content":str(tout)})
-
-        messages.append({"role":"assistant","content":resp.content})
-
-        if found_flag:
-            log("ok",f"🚩 FLAG: {found_flag}","white")
-            # Confirm format for subsequent challenges in the same CTF
-            prefix = _infer_prefix_from_flag(found_flag)
-            if prefix and ctf_name:
-                confirm_flag_format(ctf_name, prefix, found_flag)
-            summary="\n\n".join(solve_log[-6:])
-            generate_writeup(client,model,{**challenge,"ctf_name":ctf_name},
-                             found_flag,summary,final_ws,extra)
-            result("solved",found_flag,workspace=final_ws)
-            return
-
-        stop=getattr(resp,"stop_reason",None)
-        if has_tool and tool_results:
-            messages.append({"role":"user","content":tool_results})
-        elif stop=="end_turn":
-            log("warn","Stopped without flag — add more context or increase iterations","")
-            result("failed",workspace=final_ws); return
-        else:
-            log("warn",f"Unexpected stop: {stop}","")
-            result("failed",workspace=final_ws); return
-
-    log("warn",f"Max iterations ({max_iterations}) reached","")
-    result("failed",workspace=final_ws)
+def run_solve(payload):
+    return core_orchestrator.run_solve(payload, _run_solve_impl)
 
 
 
