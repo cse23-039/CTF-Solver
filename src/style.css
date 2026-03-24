@@ -262,6 +262,40 @@ body.scanlines::after {
 .form-row .form-group { flex:1; }
 .modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:14px; padding-top:10px; border-top:1px solid var(--border); }
 
+.attach-drop {
+  border:1px dashed var(--border-bright);
+  border-radius:2px;
+  padding:8px;
+  font-size:10px;
+  color:var(--text-dim);
+  text-align:center;
+  background:var(--bg-input);
+  margin-bottom:6px;
+}
+.attach-drop.drag {
+  border-color:var(--accent);
+  color:var(--text-bright);
+}
+.attach-list {
+  max-height:110px;
+  overflow-y:auto;
+  border:1px solid var(--border);
+  border-radius:2px;
+  background:var(--bg-input);
+  padding:6px;
+  font-size:10px;
+  color:var(--text-mid);
+  line-height:1.5;
+}
+.attach-item {
+  display:flex;
+  justify-content:space-between;
+  gap:8px;
+}
+.attach-item + .attach-item {
+  margin-top:3px;
+}
+
 /* ── Connect Modal ─────────────────────────────────────────────────────────── */
 #connect-overlay {
   display:none; position:fixed; inset:0;

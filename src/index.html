@@ -218,6 +218,16 @@
         placeholder="Paste file contents, source code, hex dumps, ciphertext..."></textarea>
     </div>
     <div class="form-group">
+      <label class="form-label">ATTACHMENTS</label>
+      <div class="input-row" style="margin-bottom:6px">
+        <input type="file" class="form-ctrl" id="m-attach" multiple onchange="App.onAttachmentPick(event)">
+        <button class="btn" type="button" onclick="App.clearAttachments()">CLEAR</button>
+      </div>
+      <div id="m-attach-drop" class="attach-drop">Drop files here or use the picker above</div>
+      <div id="m-attach-list" class="attach-list">No attachments selected.</div>
+      <div class="hint">Text files are embedded automatically into challenge context. Binary files are listed with metadata.</div>
+    </div>
+    <div class="form-group">
       <label class="form-label">INSTANCE / CONNECTION</label>
       <input type="text" class="form-ctrl" id="m-inst"
         placeholder="nc ctf.example.com 1337  |  https://challenge.ctf.io">

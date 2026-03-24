@@ -112,6 +112,9 @@ const uiRenderState = {
   lastDetailsRenderAt: 0,
 };
 const DETAILS_RENDER_MIN_INTERVAL_MS = 120;
+const ATTACH_MAX_FILE_BYTES = 400 * 1024;
+const ATTACH_MAX_TOTAL_BYTES = 2 * 1024 * 1024;
+let modalAttachments = [];
 
 function scheduleDetailsRender(force = false) {
   if (force) {
@@ -132,6 +135,83 @@ function scheduleDetailsRender(force = false) {
   };
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
   else setTimeout(run, 16);
+}
+
+function _fmtBytes(bytes) {
+  const b = Number(bytes || 0);
+  if (b < 1024) return `${b}B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)}KB`;
+  return `${(b / (1024 * 1024)).toFixed(2)}MB`;
+}
+
+function renderAttachmentList() {
+  const el = g('m-attach-list');
+  if (!el) return;
+  if (!modalAttachments.length) {
+    el.textContent = 'No attachments selected.';
+    return;
+  }
+  el.innerHTML = modalAttachments.map((a, i) => {
+    const flags = [a.binary ? 'binary' : 'text'];
+    if (a.truncated) flags.push('truncated');
+    if (a.error) flags.push('read-error');
+    return `<div class="attach-item"><span>${i + 1}. ${esc(a.name)}</span><span>${_fmtBytes(a.size)} • ${flags.join(', ')}</span></div>`;
+  }).join('');
+}
+
+async function _readFileText(file) {
+  const blob = file.slice(0, ATTACH_MAX_FILE_BYTES);
+  try {
+    const txt = await blob.text();
+    const printable = txt.replace(/[\x00-\x08\x0E-\x1F]/g, '');
+    const isLikelyBinary = printable.length < txt.length * 0.8;
+    return {
+      text: isLikelyBinary ? '' : printable,
+      binary: isLikelyBinary,
+      truncated: file.size > ATTACH_MAX_FILE_BYTES,
+    };
+  } catch (err) {
+    return {
+      text: '',
+      binary: true,
+      truncated: file.size > ATTACH_MAX_FILE_BYTES,
+      error: String(err),
+    };
+  }
+}
+
+async function addPickedFiles(fileList) {
+  if (!fileList || !fileList.length) return;
+  let total = modalAttachments.reduce((s, a) => s + Number(a.size || 0), 0);
+  for (const file of Array.from(fileList)) {
+    if (!file) continue;
+    if (total + file.size > ATTACH_MAX_TOTAL_BYTES) {
+      addLog('warn', `[ATTACH] Skipped ${file.name}: total attachment budget exceeded (${_fmtBytes(ATTACH_MAX_TOTAL_BYTES)}).`);
+      continue;
+    }
+    const parsed = await _readFileText(file);
+    modalAttachments.push({
+      name: file.name,
+      type: file.type || 'application/octet-stream',
+      size: file.size || 0,
+      text: parsed.text || '',
+      binary: !!parsed.binary,
+      truncated: !!parsed.truncated,
+      error: parsed.error || '',
+    });
+    total += file.size || 0;
+  }
+  renderAttachmentList();
+}
+
+function buildAttachmentPayload() {
+  if (!modalAttachments.length) return '';
+  return modalAttachments.map((a) => {
+    const header = `[[attachment:${a.name} | type=${a.type} | size=${a.size}${a.truncated ? ' | truncated=true' : ''}]]`;
+    if (a.error) return `${header}\n[read error] ${a.error}`;
+    if (a.binary || !a.text) return `${header}\n[binary content omitted]`;
+    return `${header}\n${a.text}`;
+  }).join('\n\n');
 }
 
 const CAT_SHORT = {
@@ -813,6 +893,9 @@ const App = {
   openModal() {
     const n=gv('qa-name').trim();
     if(n) sv('m-name',n);
+    modalAttachments = [];
+    if (g('m-attach')) g('m-attach').value = '';
+    renderAttachmentList();
     g('modal-overlay').classList.add('open');
     g('m-name').focus();
   },
@@ -820,18 +903,44 @@ const App = {
     g('modal-overlay').classList.remove('open');
     ['m-name','m-desc','m-files','m-inst','m-fmt'].forEach(id=>sv(id,''));
     sv('m-pts','100');
+    modalAttachments = [];
+    if (g('m-attach')) g('m-attach').value = '';
+    renderAttachmentList();
   },
-  addFromModal() {
+  async addFromModal() {
     const name=gv('m-name').trim(), desc=gv('m-desc').trim();
     if(!name||!desc){ alert('Name and description are required.'); return; }
+    const attachmentText = buildAttachmentPayload();
+    const filesField = gv('m-files').trim();
+    const mergedFiles = filesField && attachmentText
+      ? `${filesField}\n\n${attachmentText}`
+      : (filesField || attachmentText);
     const c={id:uid(),name,category:gv('m-cat'),description:desc,
-             files:gv('m-files').trim(),instance:gv('m-inst').trim(),
+             files:mergedFiles,instance:gv('m-inst').trim(),
              flagFormat:gv('m-fmt').trim(),points:parseInt(gv('m-pts'))||100,
              difficulty:gv('m-diff'),status:'staged',flag:null,
              workspace:'',platform_id:'',createdAt:Date.now(),
-             attempts:0, history:[], lastError:''};
+             attempts:0, history:[], lastError:'',
+             attachments: modalAttachments.map(a => ({ name:a.name, type:a.type, size:a.size, binary:a.binary, truncated:a.truncated }))};
     addChallenge(c); App.closeModal(); App.select(c.id);
     addLog('sys',`Added: [${c.category}] ${c.name}`,'bright');
+    if (modalAttachments.length) addLog('info', `[ATTACH] Embedded ${modalAttachments.length} attachment(s) into challenge context.`);
+  },
+
+  async onAttachmentPick(event) {
+    try {
+      const files = event?.target?.files;
+      await addPickedFiles(files);
+    } catch (err) {
+      addLog('err', `[ATTACH] Failed to read selected files: ${err}`, 'red');
+    }
+  },
+
+  clearAttachments() {
+    modalAttachments = [];
+    if (g('m-attach')) g('m-attach').value = '';
+    renderAttachmentList();
+    addLog('sys', '[ATTACH] Cleared modal attachments.', 'dim');
   },
 
   removeSelected() {
@@ -2085,6 +2194,34 @@ g('btn-settings').addEventListener('click', ()=>App.openSettings());
   loadSettings();
   applyAll();
   App.runEnvironmentDiagnostics();
+
+  const attachDrop = g('m-attach-drop');
+  if (attachDrop) {
+    const onDrag = (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      attachDrop.classList.add('drag');
+    };
+    const onLeave = (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      attachDrop.classList.remove('drag');
+    };
+    const onDrop = async (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      attachDrop.classList.remove('drag');
+      const files = evt.dataTransfer?.files;
+      if (files?.length) {
+        await addPickedFiles(files);
+      }
+    };
+    attachDrop.addEventListener('dragenter', onDrag);
+    attachDrop.addEventListener('dragover', onDrag);
+    attachDrop.addEventListener('dragleave', onLeave);
+    attachDrop.addEventListener('drop', onDrop);
+    attachDrop.addEventListener('click', () => g('m-attach')?.click());
+  }
 
   if(!settings.solverPath) {
     invoke('get_bin_dir').then(dir=>{
