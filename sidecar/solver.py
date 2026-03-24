@@ -3691,27 +3691,59 @@ _MODEL_PRICING_USD_PER_MTOK = {
     _MODEL_OPUS:   {"input": 18.00, "output": 90.00},
 }
 
-def _extract_text_for_token_estimation(value) -> str:
-    if value is None:
+def _extract_text_for_token_estimation(value, max_chars: int = 24_000, depth: int = 0) -> str:
+    if value is None or max_chars <= 0 or depth > 8:
         return ""
+
     if isinstance(value, str):
-        return value
+        return value[:max_chars]
     if isinstance(value, (int, float, bool)):
-        return str(value)
+        return str(value)[:max_chars]
+
     if isinstance(value, dict):
         parts = []
-        for k, v in value.items():
-            if k in ("content", "text", "thinking", "output"):
-                parts.append(_extract_text_for_token_estimation(v))
-            elif isinstance(v, (str, int, float, bool, list, dict)):
-                parts.append(_extract_text_for_token_estimation(v))
-        return "\n".join([p for p in parts if p])
+        used = 0
+        # Prioritize likely high-signal keys for faster/cheaper estimates.
+        priority_keys = ("role", "content", "text", "thinking", "output", "tool", "name")
+        seen = set()
+        ordered_items = []
+        for key in priority_keys:
+            if key in value:
+                ordered_items.append((key, value.get(key)))
+                seen.add(key)
+        for key, val in value.items():
+            if key not in seen:
+                ordered_items.append((key, val))
+
+        for _, item in ordered_items:
+            remaining = max_chars - used
+            if remaining <= 0:
+                break
+            chunk = _extract_text_for_token_estimation(item, max_chars=remaining, depth=depth + 1)
+            if chunk:
+                parts.append(chunk)
+                used += len(chunk) + 1
+        return "\n".join(parts)[:max_chars]
+
     if isinstance(value, list):
-        return "\n".join(_extract_text_for_token_estimation(v) for v in value)
+        parts = []
+        used = 0
+        # Favor the most recent content for iterative loop calls.
+        items = value[-24:] if len(value) > 24 else value
+        for item in items:
+            remaining = max_chars - used
+            if remaining <= 0:
+                break
+            chunk = _extract_text_for_token_estimation(item, max_chars=remaining, depth=depth + 1)
+            if chunk:
+                parts.append(chunk)
+                used += len(chunk) + 1
+        return "\n".join(parts)[:max_chars]
+
     try:
-        return json.dumps(value, ensure_ascii=False)
+        return json.dumps(value, ensure_ascii=False)[:max_chars]
     except Exception:
-        return str(value)
+        return str(value)[:max_chars]
 
 def _estimate_tokens_from_text(text: str) -> int:
     if not text:
@@ -3720,9 +3752,10 @@ def _estimate_tokens_from_text(text: str) -> int:
     return int(max(1, math.ceil(len(text) / 3.5)))
 
 def _estimate_input_tokens(messages, system: str = "") -> int:
-    total_text = _extract_text_for_token_estimation(messages)
+    msg_tail = messages[-18:] if isinstance(messages, list) and len(messages) > 18 else messages
+    total_text = _extract_text_for_token_estimation(msg_tail, max_chars=20_000)
     if system:
-        total_text += "\n" + system
+        total_text += "\n" + str(system)[-4_000:]
     return _estimate_tokens_from_text(total_text) + 120
 
 def _estimate_call_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -5789,12 +5822,13 @@ CTF:       {ctf_name or 'Unknown'}
     evidence_log = []
     evidence_ledger_path = ""
     last_strategy_pivot_iter = 0
+    contradiction_penalty = len(memory_diag.get("contradictions", []))
+    trusted_memory_hits_count = len(trusted_memory_hits)
 
     while iteration < max_iterations:
         iteration += 1
 
         # ── Multi-model routing ──────────────────────────────────────────────
-        contradiction_penalty = len(memory_diag.get("contradictions", []))
         progress_gap = (iteration - last_progress_iter if last_progress_iter else iteration) + contradiction_penalty
         route_decision = _route_model_v2(
             category=cat,
@@ -5806,7 +5840,7 @@ CTF:       {ctf_name or 'Unknown'}
             tool_failures=tool_failures,
             progress_gap=progress_gap,
             opus_budget_remaining=opus_budget_remaining,
-            memory_hits_count=len(trusted_memory_hits),
+            memory_hits_count=trusted_memory_hits_count,
         )
         model = route_decision["model"]
         use_thinking = route_decision["use_thinking"]

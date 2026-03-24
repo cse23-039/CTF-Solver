@@ -104,6 +104,35 @@ let creditState = {
   low: false,
   calls: 0,
 };
+const uiRenderState = {
+  lastListKey: '',
+  lastDetailsKey: '',
+  lastStatsKey: '',
+  detailsScheduled: false,
+  lastDetailsRenderAt: 0,
+};
+const DETAILS_RENDER_MIN_INTERVAL_MS = 120;
+
+function scheduleDetailsRender(force = false) {
+  if (force) {
+    uiRenderState.detailsScheduled = false;
+    renderDetails(true);
+    return;
+  }
+  if (uiRenderState.detailsScheduled) return;
+  uiRenderState.detailsScheduled = true;
+  const run = () => {
+    uiRenderState.detailsScheduled = false;
+    const now = Date.now();
+    if (now - uiRenderState.lastDetailsRenderAt < DETAILS_RENDER_MIN_INTERVAL_MS) {
+      setTimeout(() => renderDetails(), DETAILS_RENDER_MIN_INTERVAL_MS);
+      return;
+    }
+    renderDetails();
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  else setTimeout(run, 16);
+}
 
 const CAT_SHORT = {
   'Binary Exploitation':'pwn','Cryptography':'crypto','Forensics':'forensics',
@@ -320,9 +349,12 @@ function sortedChallenges() {
 }
 
 // ─── Render: list ─────────────────────────────────────────────────────────────
-function renderList() {
+function renderList(force = false) {
   const el = document.getElementById('ch-list');
   const sorted = sortedChallenges();
+  const listKey = `${selectedId || ''}|${sorted.map(c => `${c.id}:${c.status}:${c.createdAt}`).join(',')}`;
+  if (!force && listKey === uiRenderState.lastListKey) return;
+  uiRenderState.lastListKey = listKey;
   if (!sorted.length) {
     el.innerHTML = `<div class="list-empty">
       <span>no challenges loaded</span>
@@ -342,19 +374,45 @@ function renderList() {
 }
 
 // ─── Render: details ──────────────────────────────────────────────────────────
-function renderDetails() {
+function renderDetails(force = false) {
   const body  = document.getElementById('details-body');
   const fill  = document.getElementById('details-fill');
   const wsBtn = document.getElementById('btn-open-ws');
   document.getElementById('sb-selected').textContent = selectedId ? (ch(selectedId)?.name??'—') : '—';
 
   if (!selectedId) {
+    if (!force && uiRenderState.lastDetailsKey === 'empty') return;
+    uiRenderState.lastDetailsKey = 'empty';
+    uiRenderState.lastDetailsRenderAt = Date.now();
     fill.textContent = '────────────────────────────────────────────────────────────────────';
     if (wsBtn) wsBtn.style.display='none';
     body.innerHTML = `<div class="empty-state"><pre class="empty-art">RootHunter</pre><span>select a challenge</span></div>`;
     return;
   }
   const c = ch(selectedId); if (!c) return;
+  const h = c.history || [];
+  const lastRun = h.length ? h[h.length - 1] : null;
+  const detailsKey = [
+    selectedId,
+    c.status,
+    c.runtime,
+    c.solveModel,
+    c.solveIter,
+    c.creditSpentUsd,
+    c.creditRemainingUsd,
+    c.attempts,
+    c.platform_id,
+    c.instance,
+    c.workspace,
+    c.flag,
+    (c.description || '').length,
+    (c.files || '').length,
+    h.length,
+    lastRun ? `${lastRun.at}|${lastRun.status}|${lastRun.runtime}|${lastRun.model}|${lastRun.error}` : '',
+  ].join('¦');
+  if (!force && detailsKey === uiRenderState.lastDetailsKey) return;
+  uiRenderState.lastDetailsKey = detailsKey;
+  uiRenderState.lastDetailsRenderAt = Date.now();
   fill.textContent = `── ${c.name} `;
   if (wsBtn) wsBtn.style.display = c.workspace ? '' : 'none';
 
@@ -398,9 +456,12 @@ function renderDetails() {
 }
 
 // ─── Stats ────────────────────────────────────────────────────────────────────
-function updateStats() {
+function updateStats(force = false) {
   const ct={staged:0,solving:0,solved:0,failed:0};
   challenges.forEach(c=>{ if(ct[c.status]!==undefined) ct[c.status]++; });
+  const statsKey = `${ct.staged}|${ct.solving}|${ct.solved}|${ct.failed}|${challenges.length}`;
+  if (!force && statsKey === uiRenderState.lastStatsKey) return;
+  uiRenderState.lastStatsKey = statsKey;
   ['staged','solving','solved','failed'].forEach(k=>{
     document.getElementById(`st-${k}`).textContent=ct[k];
   });
@@ -733,7 +794,7 @@ const THEME_PRESETS = {
 // ─── Public App API ───────────────────────────────────────────────────────────
 const App = {
 
-  select(id) { selectedId=id; renderList(); renderDetails(); },
+  select(id) { selectedId=id; renderList(true); scheduleDetailsRender(true); },
 
   quickAdd() {
     const name=gv('qa-name').trim(), cat=gv('qa-cat');
@@ -1913,7 +1974,7 @@ listen('solver-log', event => {
     if (c) {
       c.creditSpentUsd = Number(e.spent_usd || c.creditSpentUsd || 0);
       c.creditRemainingUsd = Number(e.remaining_usd || c.creditRemainingUsd || 0);
-      if (selectedId === c.id) renderDetails();
+      if (selectedId === c.id) scheduleDetailsRender();
     }
 
     creditState.challengeId = cid;
@@ -1971,12 +2032,12 @@ listen('solver-log', event => {
       c.runtime   = e.elapsed;
       c.solveIter = e.iterations;
       c.solveModel= e.model;
-      renderDetails();
+      scheduleDetailsRender();
     }
 
   } else if(e.type==='workspace'&&e.path) {
     const c=ch(selectedId);
-    if(c){ c.workspace=e.path; renderDetails(); }
+    if(c){ c.workspace=e.path; scheduleDetailsRender(); }
     addLog('sys',`Workspace: ${e.path}`,'');
     const btn=g('btn-open-ws'); if(btn) btn.style.display='';
 
