@@ -1056,10 +1056,19 @@ def _run_solve_impl(payload):
     if kg_hits:
         knowledge_ctx += "\n\n## Queried knowledge graph matches:\n" + "\n".join([f"  - {h}" for h in kg_hits])
     memory_hits = _retrieve_memory_v2(
-        challenge,
+        {
+            **challenge,
+            "high_cost_mode": bool(extra.get("highCostMode", True)),
+        },
         ctf_name=ctf_name,
         top_k=int(extra.get("memoryTopK", 3))
     )
+    try:
+        from memory.trust_controls import filter_for_high_cost as _filter_for_high_cost
+        if bool(extra.get("highCostMode", True)):
+            memory_hits = _filter_for_high_cost(memory_hits, min_trust=float(extra.get("memoryHighCostTrust", 0.62)))
+    except Exception:
+        pass
     memory_diag = _analyze_memory_consistency(memory_hits)
     trusted_memory_hits = memory_diag.get("trusted_hits", [])
     memory_ctx = _build_memory_injection(trusted_memory_hits or memory_hits)
@@ -1206,6 +1215,12 @@ def _run_solve_impl(payload):
     _get_learned_overrides = None
     _a_star_attack_path = None
     _update_edge_success = None
+    _build_state_vector = None
+    _ContextualBandit = None
+    _HypothesisManager = None
+    _allocate_budget = None
+    _should_early_stop_branch = None
+    _append_replay = None
     try:
         from solver.unified_scorer import rank_branches as _rank_branches_live
     except Exception:
@@ -1243,6 +1258,27 @@ def _run_solve_impl(payload):
     except Exception:
         _a_star_attack_path = None
         _update_edge_success = None
+    try:
+        from solver.state_vector import build_state_vector as _build_state_vector
+    except Exception:
+        _build_state_vector = None
+    try:
+        from solver.contextual_bandit import ContextualBandit as _ContextualBandit
+    except Exception:
+        _ContextualBandit = None
+    try:
+        from solver.hypothesis_lifecycle import HypothesisManager as _HypothesisManager
+    except Exception:
+        _HypothesisManager = None
+    try:
+        from solver.branch_budgeting import allocate_budget as _allocate_budget, should_early_stop_branch as _should_early_stop_branch
+    except Exception:
+        _allocate_budget = None
+        _should_early_stop_branch = None
+    try:
+        from solver.replay import append_replay as _append_replay
+    except Exception:
+        _append_replay = None
 
     preflight = _run_self_healing_preflight(cat)
     emit(
@@ -1312,6 +1348,12 @@ def _run_solve_impl(payload):
     except Exception as e:
         log("warn", f"Planner stage failed: {e}", "")
 
+    if hyp_manager and planner_hypotheses:
+        hyp_manager.seed(planner_hypotheses)
+        for h in planner_hypotheses:
+            branch_stats[h] = {"name": h, "pulls": 1, "wins": 0}
+        emit("hypothesis_lifecycle", summary=hyp_manager.summary()[:8])
+
     exploit_automation = _run_exploit_dev_automation(cat, challenge_ctx, ws or base_dir, extra)
     if exploit_automation.get("enabled", False):
         emit("exploit_dev", loops=len(exploit_automation.get("loops", [])), artifacts=exploit_automation.get("artifacts", []))
@@ -1352,6 +1394,20 @@ def _run_solve_impl(payload):
     if diff in ("hard","insane") and parallel_enabled:
         log("sys","[PARALLEL] Hard challenge — attempting parallel branch solve first","bright")
         hypotheses = planner_hypotheses[:3] if planner_hypotheses else []
+        if hypotheses and _should_early_stop_branch:
+            kept = []
+            for h in hypotheses:
+                st = branch_stats.get(h, {"pulls": 1, "wins": 0})
+                if not _should_early_stop_branch(pulls=int(st.get("pulls", 1)), wins=int(st.get("wins", 0)), min_pulls=3, fail_ratio=0.8):
+                    kept.append(h)
+            hypotheses = kept or hypotheses
+        if hypotheses and _allocate_budget:
+            try:
+                alloc = _allocate_budget([branch_stats.get(h, {"name": h, "pulls": 1, "wins": 0}) for h in hypotheses], total_budget=max(3, len(hypotheses) * 2))
+                hypotheses = [str(x.get("name", "")) for x in alloc if str(x.get("name", ""))][:3]
+                emit("branch_budget", allocated=alloc[:3])
+            except Exception:
+                pass
         if not hypotheses:
             # Fast hypothesis generation via Haiku fallback
             try:
@@ -1387,6 +1443,9 @@ def _run_solve_impl(payload):
                 hypotheses = []
 
         if len(hypotheses) >= 2:
+            for h in hypotheses:
+                if h in branch_stats:
+                    branch_stats[h]["pulls"] = int(branch_stats[h].get("pulls", 1)) + 1
             challenge_ctx = {"ctf_name":ctf_name,"category":cat,"name":name,"user_msg":user_msg}
             branch_iters  = min(8, max_iterations // 4)
             branch_result = run_parallel_branches(hypotheses, challenge_ctx, api_key,
@@ -1394,6 +1453,8 @@ def _run_solve_impl(payload):
                                                    credit_guard=credit_guard)
             if branch_result:
                 winning_hyp, found_flag = branch_result
+                if winning_hyp in branch_stats:
+                    branch_stats[winning_hyp]["wins"] = int(branch_stats[winning_hyp].get("wins", 0)) + 1
                 validator_api_key = api_key if _credit_remaining_usd(credit_guard) >= 0.12 else ""
                 validation = _run_self_verification(
                     candidate_flag=found_flag,
@@ -1516,7 +1577,17 @@ def _run_solve_impl(payload):
     telemetry_path = os.path.join(policy_dir, "iteration_telemetry.json")
     priors_path = os.path.join(policy_dir, "learned_policy.json")
     benchmark_path = os.path.join(policy_dir, "benchmark_history.json")
+    bandit_path = os.path.join(policy_dir, "tool_bandit.json")
+    replay_path = os.path.join(policy_dir, "decision_replay.jsonl")
     learned_overrides = {}
+    bandit = None
+    if _ContextualBandit:
+        try:
+            bandit = _ContextualBandit(bandit_path)
+        except Exception:
+            bandit = None
+    hyp_manager = _HypothesisManager() if _HypothesisManager else None
+    branch_stats: dict[str, dict] = {}
     if _get_learned_overrides:
         try:
             if _should_retrain_weekly and _retrain_priors and _should_retrain_weekly(priors_path):
@@ -1553,6 +1624,11 @@ def _run_solve_impl(payload):
         }
 
     def _finalize_policy_and_benchmark(status: str, solved_flag: str = "") -> None:
+        if bandit:
+            try:
+                bandit.save()
+            except Exception:
+                pass
         if _append_iteration_telemetry:
             try:
                 _append_iteration_telemetry(telemetry_path, {
@@ -1575,6 +1651,7 @@ def _run_solve_impl(payload):
                 spent = float(credit_guard.get("spent_usd", 0.0)) if isinstance(credit_guard, dict) else 0.0
                 metrics = {
                     "category": cat,
+                    "difficulty": diff,
                     "challenge": name,
                     "solve_rate": float(solved),
                     "false_flag_rate": float(false_flag_candidates / max(1, false_flag_candidates + solved)),
@@ -1642,6 +1719,16 @@ def _run_solve_impl(payload):
             reasons=route_decision.get("reasons", []),
             opus_budget_remaining=opus_budget_remaining,
         )
+        if _append_replay:
+            try:
+                _append_replay(
+                    replay_path,
+                    state=state_vector,
+                    action={"type": "route", "model": model, "use_thinking": use_thinking, "route_score": route_decision.get("route_score", 0)},
+                    outcome={"accepted": True, "reasons": route_decision.get("reasons", [])},
+                )
+            except Exception:
+                pass
         _current_model_display = model.split("-")[1] if "-" in model else model
         emit("model_switch", model=model, iteration=iteration,
              thinking=use_thinking, thinking_tokens=thinking_tokens)
@@ -1659,6 +1746,42 @@ def _run_solve_impl(payload):
             fruitless=fruitless,
         )
         emit("autoloop", phase=autonomous_state.get("phase"), iteration=iteration, cycles=autonomous_state.get("cycles", 0))
+
+        state_vector = {
+            "category": cat.lower(),
+            "phase": autonomous_state.get("phase", "recon"),
+            "signal_quality": max(0.0, min(1.0, len(evidence_log) / max(3.0, float(iteration * 2)))) ,
+            "reliability_trend": 0.0,
+            "contradiction_score": max(0.0, min(1.0, len(memory_diag.get("contradictions", [])) / 4.0)),
+            "exploit_maturity": max(0.0, min(1.0, len([x for x in solve_log[-20:] if "exploit" in str(x).lower()]) / 6.0)),
+            "fruitless": fruitless,
+            "tool_failures": tool_failures,
+            "progress": iteration / max(1, max_iterations),
+            "is_remote": bool(inst),
+            "has_binary": bool(challenge.get("binary_path", "") or challenge.get("file_path", "")),
+            "difficulty_pressure": max(0.0, min(1.0, (fruitless + tool_failures) / 8.0)),
+        }
+        if _build_state_vector:
+            try:
+                rel_vals = list((_TOOL_RUNTIME.reliability_snapshot() or {}).values())
+                rel_avg = (sum(rel_vals) / len(rel_vals)) if rel_vals else 0.5
+                state_vector = _build_state_vector(
+                    category=cat,
+                    phase=autonomous_state.get("phase", "recon"),
+                    signal_quality=state_vector["signal_quality"],
+                    reliability_trend=(rel_avg - 0.5) * 2.0,
+                    contradiction_score=state_vector["contradiction_score"],
+                    exploit_maturity=state_vector["exploit_maturity"],
+                    fruitless=fruitless,
+                    tool_failures=tool_failures,
+                    iteration=iteration,
+                    total_iters=max_iterations,
+                    is_remote=bool(inst),
+                    has_binary=bool(challenge.get("binary_path", "") or challenge.get("file_path", "")),
+                )
+            except Exception:
+                pass
+        emit("state_vector", iteration=iteration, vector=state_vector)
 
         strategy = _decide_strategy_mode(
             category=cat,
@@ -1817,6 +1940,21 @@ def _run_solve_impl(payload):
                 pass
 
         # ── Trigger critic every N fruitless iterations ──────────────────────
+        planned_critic_every = int(extra.get("criticPlannedCheckpointEvery", 5))
+        if planned_critic_every > 0 and (iteration % planned_critic_every == 0):
+            try:
+                summary = "\n".join(solve_log[-10:])
+                critic_out = tool_critic(summary, iteration, cat, api_key)
+                if "PIVOT" in critic_out.upper():
+                    messages.append({"role": "user", "content":
+                        "[PLANNED CRITIC CHECKPOINT]\n"
+                        f"{critic_out}\n\n"
+                        "Before pivoting, run at least one DISCONFIRMING TEST against your current best hypothesis."
+                    })
+                emit("critic_checkpoint", iteration=iteration, planned=True)
+            except Exception:
+                pass
+
         if fruitless >= _critic_threshold and fruitless % _critic_threshold == 0:
             log("warn",f"[CRITIC] {fruitless} fruitless iters — triggering critic analysis","")
             summary = "\n".join(solve_log[-8:])
@@ -1983,6 +2121,13 @@ def _run_solve_impl(payload):
             reliability = _TOOL_RUNTIME.reliability_snapshot()
             belief_uncertainty = {k: v.uncertainty for k, v in solve_state.beliefs.items()}
             ranked = core_routing.schedule_tools_by_voi(tool_candidates, strategy, reliability, belief_uncertainty)
+            if bandit:
+                try:
+                    b_rank = bandit.rank(state_vector, [str(r.get("name", "")) for r in ranked])
+                    b_score = {str(x.get("tool", "")): float(x.get("score", 0.5)) for x in b_rank}
+                    ranked.sort(key=lambda r: (0.65 * b_score.get(str(r.get("name", "")), 0.5)) + (0.35 * reliability.get(str(r.get("name", "")), 0.5)), reverse=True)
+                except Exception:
+                    pass
             ranked_blocks = [r["block"] for r in ranked]
             non_tools = [b for b in ordered_content if getattr(b, "type", None) != "tool_use"]
             ordered_content = non_tools + ranked_blocks
@@ -2012,10 +2157,31 @@ def _run_solve_impl(payload):
                 log("sys",f"→ {tname}({preview[:160]+'...' if len(preview)>160 else preview})","dim")
                 emit("tool_call", tool=tname, iteration=iteration)
 
-                tout, tool_ok, tool_reason = _TOOL_RUNTIME.execute(tname, tinput, TOOL_MAP)
+                tool_ctx = {
+                    "is_remote": bool(inst),
+                    "binary_type": "elf" if bool(challenge.get("binary_path", "") or challenge.get("file_path", "")) else "none",
+                    "phase": autonomous_state.get("phase", "recon"),
+                    "latency_bucket": "high" if (bool(inst) and iteration > 2) else "low",
+                }
+                tout, tool_ok, tool_reason = _TOOL_RUNTIME.execute(tname, tinput, TOOL_MAP, context=tool_ctx)
                 if not tool_ok:
                     log("err", f"{tout} ({tool_reason})", "red")
                     tool_failures += 1
+                if bandit:
+                    try:
+                        bandit.update(state_vector, tname, bool(tool_ok))
+                    except Exception:
+                        pass
+                if _append_replay:
+                    try:
+                        _append_replay(
+                            replay_path,
+                            state=state_vector,
+                            action={"type": "tool_call", "tool": tname, "input": tinput},
+                            outcome={"success": bool(tool_ok), "reason": tool_reason, "preview": str(tout)[:240]},
+                        )
+                    except Exception:
+                        pass
 
                 if tname not in solve_state.beliefs:
                     solve_state.beliefs[tname] = BeliefState(hypothesis=f"tool:{tname}", uncertainty=0.5)
@@ -2044,6 +2210,16 @@ def _run_solve_impl(payload):
                         elif "exploit" in sm or "binary" in sm:
                             phase_node = "exploit"
                         attack_graph = _update_edge_success(attack_graph, [{"from": phase_node, "to": "goal", "success": bool(tool_ok)}])
+                    except Exception:
+                        pass
+                if hyp_manager and planner_hypotheses:
+                    try:
+                        active_h = planner_hypotheses[0]
+                        ev_gain = 0.12 if tool_ok else -0.08
+                        hyp_manager.update(active_h, success=bool(tool_ok), evidence_gain=ev_gain, note=f"tool={tname}")
+                        killed = hyp_manager.mark_kill_criteria(fruitless=fruitless, iteration=iteration, total_iters=max_iterations)
+                        if killed:
+                            emit("hypothesis_kill", iteration=iteration, killed=killed[:4])
                     except Exception:
                         pass
 

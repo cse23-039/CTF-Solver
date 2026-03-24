@@ -1,6 +1,8 @@
 """Closed-loop exploit reflection: execute -> analyze -> refine -> retry."""
 from __future__ import annotations
 
+import ast
+import json
 import os
 import subprocess
 import tempfile
@@ -8,6 +10,30 @@ from typing import Any
 
 from .failure_analyzer import analyze as analyze_failure
 from .tool_feedback_model import _MODEL
+
+
+def _patch_memory_path() -> str:
+    return os.path.expanduser("~/.ctf-solver/patch_memory.json")
+
+
+def _load_patch_memory() -> dict[str, list[str]]:
+    path = _patch_memory_path()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {str(k): list(v) for k, v in data.items() if isinstance(v, list)}
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_patch_memory(mem: dict[str, list[str]]) -> None:
+    path = _patch_memory_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(mem, f, ensure_ascii=False, indent=2)
 
 
 def _execute_python(script: str, timeout_s: int = 12) -> tuple[int, str]:
@@ -76,9 +102,38 @@ def refine_script_with_transforms(script: str, transforms: list[str]) -> str:
     return patched
 
 
+def _ast_patch(script: str, transform: str) -> str:
+    # Parse first to ensure the script stays syntactically valid.
+    try:
+        ast.parse(script)
+    except Exception:
+        return script
+
+    lines = script.splitlines()
+    inject = []
+    if transform == "trace_io":
+        inject = ["import logging", "logging.basicConfig(level=logging.DEBUG)"]
+    elif transform == "reduce_waits":
+        inject = ["import socket", "socket.setdefaulttimeout(2)"]
+    elif transform == "guard_none_unpack":
+        inject = ["# AST patch: guard unpack", "assert 'None' not in str(locals())"]
+    elif transform == "recvuntil_sync":
+        inject = ["# AST patch: sync boundary", "# io.recvuntil(b':', timeout=2)"]
+    else:
+        inject = [f"# AST patch: {transform}"]
+
+    patched = "\n".join(inject + lines)
+    try:
+        ast.parse(patched)
+        return patched
+    except Exception:
+        return script
+
+
 def autonomous_exploit_loop(initial_script: str, rounds: int = 5, timeout_s: int = 12) -> dict[str, Any]:
     script = initial_script
     history = []
+    patch_mem = _load_patch_memory()
     prev_regs = None
     prev_mem = None
     for idx in range(1, max(1, int(rounds)) + 1):
@@ -105,9 +160,20 @@ def autonomous_exploit_loop(initial_script: str, rounds: int = 5, timeout_s: int
         }
         history.append(step)
         if success:
+            sig = str(analysis.get("signature", "unknown"))
+            if sig:
+                existing = patch_mem.get(sig, [])
+                if transforms:
+                    patch_mem[sig] = list(dict.fromkeys((existing + transforms)[-12:]))
+                    _save_patch_memory(patch_mem)
             return {"status": "solved", "history": history, "final_script": script, "output_excerpt": out[:2000]}
         transforms = analysis.get("recommended_transforms", [])
+        sig = str(analysis.get("signature", "unknown"))
+        if not transforms and sig in patch_mem:
+            transforms = patch_mem.get(sig, [])
         if transforms:
+            for t in transforms:
+                script = _ast_patch(script, t)
             script = refine_script_with_transforms(script, transforms)
         else:
             script = refine_script(script, analysis.get("signature", "unknown"))

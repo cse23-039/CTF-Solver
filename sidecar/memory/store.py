@@ -54,6 +54,8 @@ def store_memory_v2(record: dict) -> None:
 
 def memory_trust_score(rec: dict, ctf_name: str = "", category: str = "", query_fingerprint: str = "") -> float:
     score = 0.45
+    source_strength = float(rec.get("source_strength", 0.5) or 0.5)
+    reproducibility = float(rec.get("reproducibility_count", 0.0) or 0.0)
     validator = rec.get("validator") if isinstance(rec.get("validator"), dict) else {}
     val_conf = float(validator.get("confidence", 0.0) or 0.0)
     if validator.get("verdict") == "pass":
@@ -66,6 +68,9 @@ def memory_trust_score(rec: dict, ctf_name: str = "", category: str = "", query_
         score += 0.06
     if rec.get("dead_ends"):
         score -= 0.05
+
+    score += max(0.0, min(0.16, source_strength * 0.16))
+    score += max(0.0, min(0.12, reproducibility * 0.03))
 
     if ctf_name and str(rec.get("ctf_name", "")).strip().lower() == ctf_name.strip().lower():
         score += 0.08
@@ -142,6 +147,9 @@ def retrieve_memory_v2(challenge: dict, ctf_name: str = "", top_k: int = 3) -> l
     scored = []
     category = str(challenge.get("category", "")).strip()
     query_fp = challenge_fingerprint(challenge, ctf_name)
+    high_cost_mode = bool(challenge.get("high_cost_mode", False))
+    min_trust = 0.62 if high_cost_mode else 0.45
+
     for rec in rows:
         doc = " ".join([
             str(rec.get("challenge_name", "")),
@@ -164,6 +172,8 @@ def retrieve_memory_v2(challenge: dict, ctf_name: str = "", top_k: int = 3) -> l
         rec2["_memory_similarity"] = round(similarity, 4)
         rec2["_memory_trust"] = round(trust, 4)
         rec2["_memory_score"] = round(score, 4)
+        if trust < min_trust:
+            continue
         scored.append((score, rec2))
 
     scored.sort(key=lambda x: x[0], reverse=True)

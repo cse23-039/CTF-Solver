@@ -132,7 +132,7 @@ import copy, struct, sys
 from collections import defaultdict
 
 class BitView:
-    """View a bytearray as individual bits for CPU state simulation."""
+    '''View a bytearray as individual bits for CPU state simulation.'''
     def __init__(self, state):
         self._s = state
     def __getitem__(self, key):
