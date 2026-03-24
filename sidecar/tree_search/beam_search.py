@@ -1,4 +1,4 @@
-\"\"\"beam_search scaffold for advanced CTF solver architecture.\"\"\"
+"""beam_search scaffold for advanced CTF solver architecture."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,10 +11,11 @@ class beam_searchState:
 
 
 def run(input_data: Any = None, **kwargs: Any) -> dict[str, Any]:
-    \"\"\"Run scaffold step and return structured output.\"\"\"
+    """Run scaffold step and return structured output."""
     return {
         "module": "beam_search",
         "status": "ready",
         "input_summary": str(type(input_data).__name__),
         "kwargs_keys": sorted(kwargs.keys()),
     }
+

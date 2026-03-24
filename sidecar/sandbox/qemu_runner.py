@@ -1,4 +1,4 @@
-\"\"\"qemu_runner scaffold for advanced CTF solver architecture.\"\"\"
+"""qemu_runner scaffold for advanced CTF solver architecture."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,10 +11,11 @@ class qemu_runnerState:
 
 
 def run(input_data: Any = None, **kwargs: Any) -> dict[str, Any]:
-    \"\"\"Run scaffold step and return structured output.\"\"\"
+    """Run scaffold step and return structured output."""
     return {
         "module": "qemu_runner",
         "status": "ready",
         "input_summary": str(type(input_data).__name__),
         "kwargs_keys": sorted(kwargs.keys()),
     }
+
