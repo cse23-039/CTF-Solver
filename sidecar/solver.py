@@ -2975,6 +2975,10 @@ def tool_knowledge_store(ctf_name: str, key: str, value: str) -> str:
     """Store a discovered fact in the cross-challenge CTF knowledge graph."""
     k = _kgkey(ctf_name)
     _ctf_knowledge[k][key] = value
+    try:
+        _kg_upsert_fact(ctf_name, key, value)
+    except Exception:
+        pass
     emit("knowledge", ctf=ctf_name, key=key, value=value[:200])
     log("sys", f"[KG] Stored: {key} = {value[:80]}", "dim")
     return f"Stored: {key} → {value[:80]}"
@@ -2983,6 +2987,12 @@ def tool_knowledge_get(ctf_name: str) -> str:
     """Retrieve all known facts about a CTF (shared infrastructure, creds, patterns)."""
     k = _kgkey(ctf_name)
     facts = _ctf_knowledge.get(k, {})
+    try:
+        corpus = _load_kg_corpus().get("facts", {}).get(k, {})
+        if isinstance(corpus, dict):
+            facts = {**corpus, **facts}
+    except Exception:
+        pass
     if not facts:
         return "No cross-challenge knowledge stored yet for this CTF."
     lines = [f"## Cross-challenge knowledge for '{ctf_name}':"]
@@ -2994,6 +3004,12 @@ def _get_knowledge_injection(ctf_name: str) -> str:
     """Build knowledge context string for system prompt injection."""
     k = _kgkey(ctf_name)
     facts = _ctf_knowledge.get(k, {})
+    try:
+        corpus = _load_kg_corpus().get("facts", {}).get(k, {})
+        if isinstance(corpus, dict):
+            facts = {**corpus, **facts}
+    except Exception:
+        pass
     if not facts: return ""
     lines = ["## Known CTF context (from previous challenges):"]
     for key, val in facts.items():
@@ -4033,7 +4049,7 @@ def _build_memory_injection(memory_hits: list[dict]) -> str:
     lines.append("Use this as prior evidence, but verify with fresh tool outputs.")
     return "\n".join(lines)
 
-def _memory_trust_score(rec: dict, ctf_name: str = "", category: str = "") -> float:
+def _memory_trust_score(rec: dict, ctf_name: str = "", category: str = "", query_fingerprint: str = "") -> float:
     score = 0.45
     validator = rec.get("validator") if isinstance(rec.get("validator"), dict) else {}
     val_conf = float(validator.get("confidence", 0.0) or 0.0)
@@ -4052,6 +4068,14 @@ def _memory_trust_score(rec: dict, ctf_name: str = "", category: str = "") -> fl
         score += 0.08
     if category and str(rec.get("category", "")).strip().lower() == category.strip().lower():
         score += 0.05
+    if query_fingerprint and str(rec.get("fingerprint", "")) == query_fingerprint:
+        score += 0.10
+
+    ts = int(rec.get("timestamp", 0) or 0)
+    if ts > 0:
+        age_days = max(0.0, (time.time() - ts) / 86400.0)
+        decay = min(0.20, age_days * 0.0025)
+        score -= decay
 
     return max(0.0, min(1.0, score))
 
@@ -4112,6 +4136,7 @@ def _retrieve_memory_v2(challenge: dict, ctf_name: str = "", top_k: int = 3) -> 
     rows = _load_memory_v2()
     scored = []
     category = str(challenge.get("category", "")).strip()
+    query_fp = _challenge_fingerprint(challenge, ctf_name)
     for rec in rows:
         doc = " ".join([
             str(rec.get("challenge_name", "")),
@@ -4128,7 +4153,7 @@ def _retrieve_memory_v2(challenge: dict, ctf_name: str = "", top_k: int = 3) -> 
             continue
         ctf_bonus = 3 if ctf_name and rec.get("ctf_name", "").strip().lower() == ctf_name.strip().lower() else 0
         similarity = overlap / max(1, len(qtok))
-        trust = _memory_trust_score(rec, ctf_name=ctf_name, category=category)
+        trust = _memory_trust_score(rec, ctf_name=ctf_name, category=category, query_fingerprint=query_fp)
         score = (overlap + ctf_bonus) + (trust * 6.0)
         rec2 = dict(rec)
         rec2["_memory_similarity"] = round(similarity, 4)
@@ -4138,6 +4163,409 @@ def _retrieve_memory_v2(challenge: dict, ctf_name: str = "", top_k: int = 3) -> 
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return [x[1] for x in scored[:max(1, top_k)]]
+
+_NETWORK_TOOLS = {
+    "http_request", "download_file", "submit_flag", "browser_agent", "web_crawl", "sqlmap", "ffuf",
+    "nosql_inject", "file_upload", "template_inject", "side_channel"
+}
+
+_STRATEGY_PLAYBOOKS = {
+    "binary exploitation": {
+        "entry": "recon -> mitigations -> crash primitive -> control primitive -> exploit chain",
+        "decision_tree": [
+            "If NX off and direct RIP control: prioritize shellcode path.",
+            "If PIE+Canary present: pivot to infoleak, then ret2libc/ROP.",
+            "If heap indicators found: run heap grooming + allocator fingerprinting.",
+        ],
+        "tools": ["checksec", "binary_analysis", "execute_python", "rop_chain", "libc_lookup"],
+    },
+    "cryptography": {
+        "entry": "classify primitive -> detect weakness -> verify with small tests -> recover secret",
+        "decision_tree": [
+            "If RSA with weak params/leaks: attempt factorization/CRT faults/small-exponent paths.",
+            "If substitution/stream hints: run frequency/known-plaintext and keystream recovery.",
+            "If oracle behavior detected: prioritize adaptive chosen-ciphertext flow.",
+        ],
+        "tools": ["crypto_attack", "decode_transform", "execute_python", "factordb", "rsa_toolkit"],
+    },
+    "web": {
+        "entry": "surface mapping -> auth/session review -> injection matrix -> exploit + verify",
+        "decision_tree": [
+            "If user input reflected: test XSS + template injection + output encoding bypasses.",
+            "If DB-backed forms: probe SQL/NoSQL then automate extraction path.",
+            "If upload endpoints exist: run polyglot/MIME bypass with retrieval validation.",
+        ],
+        "tools": ["http_request", "web_crawl", "sqlmap", "nosql_inject", "file_upload", "template_inject"],
+    },
+    "reverse engineering": {
+        "entry": "identify packer/obfuscation -> recover semantics -> derive key/check logic",
+        "decision_tree": [
+            "If symbols stripped: prioritize decompile + AI rename + execution traces.",
+            "If anti-debug checks: bypass checks and re-run dynamic analysis.",
+            "If crypto-like loops found: extract constants and test reduced models in Python.",
+        ],
+        "tools": ["disassemble", "ghidra_decompile", "ai_rename_functions", "execute_python", "frida_trace"],
+    },
+    "forensics": {
+        "entry": "triage artifacts -> recover hidden data -> correlate timestamps/channels",
+        "decision_tree": [
+            "If image anomalies: inspect metadata, channels, LSB, broken headers.",
+            "If pcap provided: reconstruct streams and extract credentials/tokens/files.",
+            "If memory dump clues: process tree, strings, suspicious handles/modules.",
+        ],
+        "tools": ["analyze_file", "steg_brute", "pcap_reassemble", "volatility", "pdf_forensics"],
+    },
+}
+
+def _normalize_category_key(category: str) -> str:
+    cat = str(category or "").strip().lower()
+    if "pwn" in cat or "binary" in cat:
+        return "binary exploitation"
+    if "crypto" in cat:
+        return "cryptography"
+    if "web" in cat:
+        return "web"
+    if "reverse" in cat or "rev" in cat:
+        return "reverse engineering"
+    if "forensic" in cat:
+        return "forensics"
+    return cat
+
+def _build_attack_playbook(category: str, difficulty: str, phase: str, multimodal: dict | None = None) -> dict:
+    key = _normalize_category_key(category)
+    pb = _STRATEGY_PLAYBOOKS.get(key, {
+        "entry": "recon -> hypothesis -> evidence -> exploit -> verify",
+        "decision_tree": ["Use evidence-driven pivots and avoid repeating failed paths."],
+        "tools": ["pre_solve_recon", "rank_hypotheses", "execute_python"],
+    })
+    diff = str(difficulty or "medium").lower()
+    intensity = {"easy": "lean", "medium": "balanced", "hard": "deep", "insane": "max"}.get(diff, "balanced")
+    mm_modalities = (multimodal or {}).get("modalities", [])
+    return {
+        "category": key,
+        "phase": phase,
+        "difficulty": diff,
+        "intensity": intensity,
+        "entry": pb.get("entry", ""),
+        "decision_tree": pb.get("decision_tree", [])[:6],
+        "tools": pb.get("tools", [])[:8],
+        "modalities": mm_modalities,
+    }
+
+def _render_playbook_for_prompt(playbook: dict) -> str:
+    if not playbook:
+        return ""
+    lines = [
+        "## Attack Strategy Library (Playbook)",
+        f"Category profile: {playbook.get('category','general')} | intensity={playbook.get('intensity','balanced')} | phase={playbook.get('phase','recon')}",
+        f"Entry flow: {playbook.get('entry','recon -> exploit -> verify')}",
+        "Decision tree:",
+    ]
+    for idx, node in enumerate(playbook.get("decision_tree", [])[:6], 1):
+        lines.append(f"{idx}. {node}")
+    tools = playbook.get("tools", [])
+    if tools:
+        lines.append(f"Preferred tool chain: {', '.join(tools)}")
+    if playbook.get("modalities"):
+        lines.append(f"Multimodal priors: {', '.join(playbook.get('modalities', []))}")
+    return "\n".join(lines)
+
+def _build_multimodal_feature_pack(challenge: dict, files_blob: str, extra: dict) -> dict:
+    text = str(files_blob or "")
+    attachments = challenge.get("attachments") if isinstance(challenge.get("attachments"), list) else []
+    headers = re.findall(r"\[\[attachment:([^\]]+)\]\]", text)
+    descriptors = attachments if attachments else []
+
+    modalities = set()
+    feature_bag = {
+        "binary": [],
+        "network": [],
+        "image": [],
+        "doc": [],
+        "archive": [],
+        "source": [],
+    }
+
+    def _classify_name(name: str, ftype: str = ""):
+        raw = f"{name} {ftype}".lower()
+        if re.search(r"\.(elf|exe|dll|so|bin)$", raw):
+            modalities.add("binary")
+            feature_bag["binary"].append(name)
+        elif re.search(r"\.(pcap|pcapng)$", raw):
+            modalities.add("network")
+            feature_bag["network"].append(name)
+        elif re.search(r"\.(png|jpg|jpeg|gif|bmp|webp|tiff)$", raw):
+            modalities.add("image")
+            feature_bag["image"].append(name)
+        elif re.search(r"\.(pdf|doc|docx|rtf|odt)$", raw):
+            modalities.add("doc")
+            feature_bag["doc"].append(name)
+        elif re.search(r"\.(zip|tar|gz|7z|rar)$", raw):
+            modalities.add("archive")
+            feature_bag["archive"].append(name)
+        elif re.search(r"\.(py|js|ts|java|go|rs|c|cpp|h|php|html|css|json|yaml|yml|xml)$", raw):
+            modalities.add("source")
+            feature_bag["source"].append(name)
+
+    for h in headers:
+        _classify_name(h)
+    for a in descriptors:
+        if isinstance(a, dict):
+            _classify_name(str(a.get("name", "")), str(a.get("type", "")))
+
+    lower_text = text.lower()
+    if any(x in lower_text for x in ("png", "jpeg", "exif", "steg")): modalities.add("image")
+    if any(x in lower_text for x in ("pcap", "http/1.1", "dns", "tcp stream")): modalities.add("network")
+    if any(x in lower_text for x in ("elf", "checksec", "rop", "libc")): modalities.add("binary")
+
+    summary = {
+        "modalities": sorted(modalities),
+        "feature_bag": {k: v[:10] for k, v in feature_bag.items() if v},
+        "attachment_count": len(headers) if headers else len(descriptors),
+        "ingest_mode": "native_structured",
+        "planner_hint": "Prioritize modality-specific tools before generic brute-force.",
+    }
+    return summary
+
+def _render_multimodal_for_prompt(pack: dict) -> str:
+    if not pack:
+        return ""
+    lines = ["## Multimodal Ingest", f"Modalities: {', '.join(pack.get('modalities', [])) or 'text-only'}"]
+    fb = pack.get("feature_bag", {}) if isinstance(pack.get("feature_bag"), dict) else {}
+    for key in ("binary", "network", "image", "doc", "archive", "source"):
+        vals = fb.get(key, [])
+        if vals:
+            lines.append(f"- {key}: {', '.join(vals[:6])}")
+    lines.append(f"Planner hint: {pack.get('planner_hint','')}")
+    return "\n".join(lines)
+
+def _validator_agent_secondary(candidate_flag: str, evidence_excerpt: str, api_key: str = "") -> dict:
+    fallback = {
+        "verdict": "pass" if candidate_flag and "{" in candidate_flag and "}" in candidate_flag else "fail",
+        "confidence": 0.55,
+        "reason": "secondary-fallback"
+    }
+    if not api_key:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return fallback
+    try:
+        import anthropic as _ant
+        cli = _ant.Anthropic(api_key=api_key)
+        prompt = f"""Return ONLY JSON with verdict, confidence, reason.\nCandidate flag: {candidate_flag}\nEvidence:\n{evidence_excerpt[:2800]}\nIf chain-of-custody is weak, fail."""
+        resp = cli.messages.create(
+            model=_MODEL_HAIKU,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text if resp.content else ""
+        j = re.search(r"\{[\s\S]*\}", raw)
+        if not j:
+            return fallback
+        out = json.loads(j.group(0))
+        verdict = str(out.get("verdict", "fail")).strip().lower()
+        return {
+            "verdict": "pass" if verdict == "pass" else "fail",
+            "confidence": max(0.0, min(1.0, float(out.get("confidence", 0.5) or 0.5))),
+            "reason": str(out.get("reason", "secondary-agent"))[:220],
+        }
+    except Exception:
+        return fallback
+
+def _reproducibility_check(candidate_flag: str, evidence_log: list[dict], solve_log: list[str]) -> dict:
+    text_window = "\n".join(solve_log[-12:])
+    in_reasoning = candidate_flag in text_window if candidate_flag else False
+    evidence_hits = 0
+    for rec in (evidence_log or [])[-80:]:
+        out = str(rec.get("output", ""))
+        if candidate_flag and candidate_flag in out:
+            evidence_hits += 1
+    pass_ok = in_reasoning or evidence_hits > 0
+    conf = 0.72 if evidence_hits >= 2 else (0.62 if pass_ok else 0.20)
+    return {
+        "verdict": "pass" if pass_ok else "fail",
+        "confidence": conf,
+        "reason": f"reasoning_hit={in_reasoning} evidence_hits={evidence_hits}",
+        "evidence_hits": evidence_hits,
+    }
+
+def _run_self_verification(candidate_flag: str, conversation_summary: str, ctf_name: str, category: str,
+                           evidence_log: list[dict], solve_log: list[str], api_key: str = "") -> dict:
+    primary = _validate_candidate_flag(
+        conversation_summary=conversation_summary,
+        candidate_flag=candidate_flag,
+        ctf_name=ctf_name,
+        category=category,
+        api_key=api_key,
+    )
+    repro = _reproducibility_check(candidate_flag, evidence_log, solve_log)
+    secondary = _validator_agent_secondary(candidate_flag, "\n".join(solve_log[-10:]), api_key=api_key)
+
+    votes = [primary.get("verdict") == "pass", repro.get("verdict") == "pass", secondary.get("verdict") == "pass"]
+    score = (
+        float(primary.get("confidence", 0.0)) * 0.45 +
+        float(repro.get("confidence", 0.0)) * 0.30 +
+        float(secondary.get("confidence", 0.0)) * 0.25
+    )
+    verdict = "pass" if (sum(1 for v in votes if v) >= 2 and score >= 0.58) else "fail"
+    return {
+        "verdict": verdict,
+        "confidence": round(score, 3),
+        "reason": f"votes={sum(1 for v in votes if v)}/3",
+        "agents": {"primary": primary, "secondary": secondary, "repro": repro},
+    }
+
+def _kg_corpus_path() -> str:
+    return os.path.expanduser("~/.ctf-solver/knowledge_corpus.json")
+
+def _load_kg_corpus() -> dict:
+    path = _kg_corpus_path()
+    if not os.path.exists(path):
+        return {"nodes": [], "edges": [], "facts": {}}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            data.setdefault("nodes", [])
+            data.setdefault("edges", [])
+            data.setdefault("facts", {})
+            return data
+    except Exception:
+        pass
+    return {"nodes": [], "edges": [], "facts": {}}
+
+def _save_kg_corpus(data: dict) -> None:
+    path = _kg_corpus_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def _kg_upsert_fact(ctf_name: str, key: str, value: str) -> None:
+    corpus = _load_kg_corpus()
+    k = _kgkey(ctf_name)
+    facts = corpus.setdefault("facts", {})
+    bucket = facts.setdefault(k, {})
+    bucket[key] = value
+    nodes = corpus.setdefault("nodes", [])
+    edges = corpus.setdefault("edges", [])
+    ctf_node = f"ctf:{k}"
+    key_node = f"fact:{k}:{key}"
+    if ctf_node not in nodes: nodes.append(ctf_node)
+    if key_node not in nodes: nodes.append(key_node)
+    edges.append({"from": ctf_node, "to": key_node, "rel": "has_fact", "ts": int(time.time())})
+    _save_kg_corpus(corpus)
+
+def _kg_query_context(ctf_name: str, query_terms: set[str], max_items: int = 8) -> list[str]:
+    corpus = _load_kg_corpus()
+    facts = corpus.get("facts", {})
+    k = _kgkey(ctf_name)
+    local = facts.get(k, {}) if isinstance(facts, dict) else {}
+    out = []
+    for fk, fv in local.items():
+        txt = f"{fk} {fv}".lower()
+        overlap = len(query_terms & _tokenize_simple(txt)) if query_terms else 1
+        if overlap > 0:
+            out.append((overlap, f"{fk}: {str(fv)[:200]}"))
+    out.sort(key=lambda x: x[0], reverse=True)
+    return [v for _, v in out[:max_items]]
+
+def _compute_expected_value_score(challenge: dict) -> float:
+    diff = str(challenge.get("difficulty", "medium")).lower()
+    pts = float(challenge.get("points", 100) or 100)
+    diff_mult = {"easy": 1.2, "medium": 1.0, "hard": 0.82, "insane": 0.62}.get(diff, 1.0)
+    return round((pts * diff_mult) / 100.0, 4)
+
+def _run_exploit_dev_automation(category: str, challenge_ctx: dict, workspace: str, extra: dict) -> dict:
+    cat = _normalize_category_key(category)
+    artifacts = []
+    loops = []
+    if cat in ("binary exploitation", "reverse engineering"):
+        loops.append({
+            "name": "exploit_script_variants",
+            "variants": ["ret2win", "ret2libc", "rop-chain", "format-string"],
+            "validation": ["local_replay", "remote_probe", "stability_check"],
+        })
+    if cat == "web":
+        loops.append({
+            "name": "web_attack_variants",
+            "variants": ["sqli_boolean", "sqli_time", "ssti_probe", "upload_polyglot"],
+            "validation": ["response_diff", "timing_delta", "auth_state_change"],
+        })
+    if cat == "cryptography":
+        loops.append({
+            "name": "crypto_hypothesis_variants",
+            "variants": ["parameter_edge_case", "modulus_fault", "oracle_adaptive"],
+            "validation": ["known_plaintext", "consistency_check"],
+        })
+
+    if loops:
+        payload = {
+            "ts": int(time.time()),
+            "category": cat,
+            "challenge": challenge_ctx.get("name", ""),
+            "loops": loops,
+            "fuzzing": {
+                "enabled": True,
+                "seed_strategy": "evidence_guided",
+                "max_cases": int(extra.get("fuzzMaxCases", 128)),
+            },
+        }
+        if workspace:
+            try:
+                out_dir = os.path.join(workspace, ".solver")
+                os.makedirs(out_dir, exist_ok=True)
+                out_path = os.path.join(out_dir, "exploit_dev_automation.json")
+                with open(out_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                artifacts.append(out_path)
+            except Exception:
+                pass
+        return {"enabled": True, "loops": loops, "artifacts": artifacts}
+    return {"enabled": False, "loops": [], "artifacts": []}
+
+def run_benchmark(payload: dict):
+    rows = payload.get("results", []) if isinstance(payload.get("results"), list) else []
+    total = len(rows)
+    if total == 0:
+        emit("benchmark_summary", error="no_results")
+        print(json.dumps({"type": "benchmark_result", "status": "failed", "error": "no_results"}, ensure_ascii=False), flush=True)
+        return
+
+    solved = 0
+    total_time = 0.0
+    total_cost = 0.0
+    false_flags = 0
+    for rec in rows:
+        status = str(rec.get("status", "")).lower()
+        solved += 1 if status == "solved" else 0
+        total_time += float(rec.get("elapsed", 0.0) or 0.0)
+        total_cost += float(rec.get("spent_usd", 0.0) or 0.0)
+        false_flags += 1 if bool(rec.get("false_flag", False)) else 0
+
+    solve_rate = solved / max(1, total)
+    time_to_flag = (total_time / max(1, solved)) if solved else 0.0
+    cost_per_flag = (total_cost / max(1, solved)) if solved else total_cost
+    false_flag_rate = false_flags / max(1, total)
+
+    gates = payload.get("gates", {}) if isinstance(payload.get("gates"), dict) else {}
+    min_solve = float(gates.get("min_solve_rate", 0.0) or 0.0)
+    max_cost = float(gates.get("max_cost_per_flag", 99999.0) or 99999.0)
+    max_false = float(gates.get("max_false_flag_rate", 1.0) or 1.0)
+
+    gate_ok = (solve_rate >= min_solve) and (cost_per_flag <= max_cost) and (false_flag_rate <= max_false)
+    summary = {
+        "type": "benchmark_result",
+        "status": "passed" if gate_ok else "failed",
+        "total": total,
+        "solved": solved,
+        "solve_rate": round(solve_rate, 4),
+        "time_to_flag": round(time_to_flag, 3),
+        "cost_per_flag": round(cost_per_flag, 6),
+        "false_flag_rate": round(false_flag_rate, 4),
+        "gates": {"min_solve_rate": min_solve, "max_cost_per_flag": max_cost, "max_false_flag_rate": max_false},
+    }
+    emit("benchmark_summary", **summary)
+    print(json.dumps(summary, ensure_ascii=False), flush=True)
 
 def _store_memory_v2(record: dict) -> None:
     path = _memory_v2_path()
@@ -5468,6 +5896,16 @@ def run_solve(payload):
     base_dir       = payload.get("base_dir","")
     ctf_name       = payload.get("ctf_name","")
     extra          = payload.get("extraConfig",{})
+    human_loop = {
+        "approve_pivot": bool(extra.get("humanApprovePivot", False)),
+        "lock_strategy": bool(extra.get("lockStrategy", False)),
+        "locked_mode": str(extra.get("lockedStrategyMode", "")).strip(),
+        "force_local_only": bool(extra.get("forceLocalOnly", False)),
+    }
+    allocator_cfg = {
+        "enabled": bool(extra.get("adaptiveAllocator", True)),
+        "queue_expected_value": float(extra.get("queueExpectedValue", 0.0) or 0.0),
+    }
 
     _PLATFORM_CONFIG = {**pc,"challenge_id":challenge.get("platform_id","")}
     os.environ["ANTHROPIC_API_KEY"] = api_key  # make available to sub-agents
@@ -5506,6 +5944,12 @@ def run_solve(payload):
         max_iterations = budget_override
     else:
         max_iterations = ITERATION_BUDGET.get(diff.lower(), 25)
+    if allocator_cfg.get("enabled", True):
+        ev = allocator_cfg.get("queue_expected_value", 0.0)
+        if ev > 1.2:
+            max_iterations = int(max_iterations * 1.15)
+        elif ev < 0.6:
+            max_iterations = max(8, int(max_iterations * 0.75))
     credit_guard = _init_credit_guard(extra, challenge, max_iterations)
     if credit_guard.get("enabled", False) and credit_guard.get("conservative", False):
         max_iterations = min(max_iterations, int(credit_guard.get("conservative_cap_iters", max_iterations)))
@@ -5515,9 +5959,16 @@ def run_solve(payload):
     # Enabled tools filter — include all new tools by default
     enabled = set(extra.get("enabledTools", list(TOOL_MAP.keys())))
     active_tools = [t for t in TOOLS if t["name"] in enabled]
+    if human_loop.get("force_local_only", False):
+        active_tools = [t for t in active_tools if t.get("name") not in _NETWORK_TOOLS]
+        emit("human_loop", action="force_local_only", active_tools=len(active_tools))
 
     # ── Cross-challenge knowledge injection ──────────────────────────────────
     knowledge_ctx = _get_knowledge_injection(ctf_name)
+    kg_query_terms = _tokenize_simple(" ".join([str(challenge.get("name", "")), str(challenge.get("description", ""))[:1200]]))
+    kg_hits = _kg_query_context(ctf_name, kg_query_terms, max_items=8)
+    if kg_hits:
+        knowledge_ctx += "\n\n## Queried knowledge graph matches:\n" + "\n".join([f"  - {h}" for h in kg_hits])
     memory_hits = _retrieve_memory_v2(
         challenge,
         ctf_name=ctf_name,
@@ -5537,6 +5988,22 @@ def run_solve(payload):
         contradictions=memory_diag.get("contradictions", []),
         trusted_hits=len(trusted_memory_hits),
         guidance=memory_diag.get("guidance", ""),
+    )
+
+    multimodal_pack = _build_multimodal_feature_pack(challenge, files, extra)
+    playbook = _build_attack_playbook(cat, diff, phase="recon", multimodal=multimodal_pack)
+    emit(
+        "multimodal_ingest",
+        modalities=multimodal_pack.get("modalities", []),
+        attachment_count=multimodal_pack.get("attachment_count", 0),
+        ingest_mode=multimodal_pack.get("ingest_mode", "native_structured"),
+    )
+    emit(
+        "strategy_playbook",
+        category=playbook.get("category", "general"),
+        intensity=playbook.get("intensity", "balanced"),
+        phase=playbook.get("phase", "recon"),
+        tools=playbook.get("tools", []),
     )
 
     # ── Auto-detect flag format ───────────────────────────────────────────────
@@ -5595,6 +6062,12 @@ CTF:       {ctf_name or 'Unknown'}
     user_msg += f"\n## Description\n{desc}\n"
     if signal_summary:
         user_msg += f"\n## Parsed Challenge Signals\n{signal_summary}\n"
+    mm_prompt = _render_multimodal_for_prompt(multimodal_pack)
+    if mm_prompt:
+        user_msg += f"\n{mm_prompt}\n"
+    playbook_prompt = _render_playbook_for_prompt(playbook)
+    if playbook_prompt:
+        user_msg += f"\n{playbook_prompt}\n"
     if memory_diag.get("summary"):
         user_msg += f"\n## Memory Trust/Consistency\n{memory_diag.get('summary')}\n"
         user_msg += f"Guidance: {memory_diag.get('guidance','')}\n"
@@ -5623,6 +6096,8 @@ CTF:       {ctf_name or 'Unknown'}
         "hints": explicit_hints,
         "name_hints": name_hints,
         "binary_path": challenge.get("binary_path", "") or challenge.get("file_path", ""),
+        "multimodal": multimodal_pack,
+        "playbook": playbook,
     }
 
     preflight = _run_self_healing_preflight(cat)
@@ -5670,6 +6145,13 @@ CTF:       {ctf_name or 'Unknown'}
                     user_msg += f"\n## Planner Tool Outputs\n{planner_join}\n"
     except Exception as e:
         log("warn", f"Planner stage failed: {e}", "")
+
+    exploit_automation = _run_exploit_dev_automation(cat, challenge_ctx, ws or base_dir, extra)
+    if exploit_automation.get("enabled", False):
+        emit("exploit_dev", loops=len(exploit_automation.get("loops", [])), artifacts=exploit_automation.get("artifacts", []))
+        user_msg += "\n## Exploit/Dev Automation\n"
+        for loop in exploit_automation.get("loops", [])[:5]:
+            user_msg += f"- {loop.get('name')}: variants={', '.join(loop.get('variants', [])[:6])}\n"
 
     if extra.get("autoBootstrapLab", True) and diff in ("hard", "insane"):
         try:
@@ -5747,11 +6229,13 @@ CTF:       {ctf_name or 'Unknown'}
             if branch_result:
                 winning_hyp, found_flag = branch_result
                 validator_api_key = api_key if _credit_remaining_usd(credit_guard) >= 0.12 else ""
-                validation = _validate_candidate_flag(
-                    conversation_summary=winning_hyp,
+                validation = _run_self_verification(
                     candidate_flag=found_flag,
+                    conversation_summary=winning_hyp,
                     ctf_name=ctf_name,
                     category=cat,
+                    evidence_log=[],
+                    solve_log=[winning_hyp],
                     api_key=validator_api_key,
                 )
                 emit(
@@ -5818,6 +6302,12 @@ CTF:       {ctf_name or 'Unknown'}
     pivot_events = []
     strategy_history = []
     opus_budget_remaining = int(extra.get("opusBudget", max(3, max_iterations // 3)))
+    if allocator_cfg.get("enabled", True):
+        ev = allocator_cfg.get("queue_expected_value", 0.0)
+        if ev < 0.6:
+            opus_budget_remaining = max(0, min(opus_budget_remaining, 1))
+        elif ev > 1.2 and diff in ("hard", "insane"):
+            opus_budget_remaining = max(opus_budget_remaining, max(3, max_iterations // 2))
     autonomous_state = {"phase": "recon", "cycles": 0}
     evidence_log = []
     evidence_ledger_path = ""
@@ -5890,6 +6380,11 @@ CTF:       {ctf_name or 'Unknown'}
             total_iters=max_iterations,
             memory_diag=memory_diag,
         )
+        if human_loop.get("lock_strategy", False):
+            locked_mode = human_loop.get("locked_mode") or strategy.get("base_mode", "general-evidence")
+            strategy["mode"] = locked_mode
+            strategy["pivot"] = False
+            strategy["reason"] = "human-locked-strategy"
         strategy_history.append({"iteration": iteration, **strategy})
         emit(
             "strategy",
@@ -5913,6 +6408,19 @@ CTF:       {ctf_name or 'Unknown'}
         )
         if strategy.get("pivot") and (iteration - last_strategy_pivot_iter >= 2):
             pivot_reason = strategy.get("reason") or "adaptive-pivot"
+            if human_loop.get("approve_pivot", False):
+                emit(
+                    "pivot_request",
+                    iteration=iteration,
+                    mode=strategy.get("mode"),
+                    reason=pivot_reason,
+                    recommended_tools=strategy.get("recommended_tools", []),
+                )
+                messages.append({"role": "user", "content":
+                    "[HUMAN-IN-THE-LOOP]\n"
+                    "Pivot approval required and not granted in this run. Continue current strategy but collect evidence for next pivot request."
+                })
+                continue
             pivot_events.append(f"iter={iteration}: strategy pivot due to {pivot_reason} -> {strategy.get('mode')}")
             messages.append({"role": "user", "content":
                 "[ADAPTIVE STRATEGY ENGINE]\n"
@@ -6169,11 +6677,13 @@ CTF:       {ctf_name or 'Unknown'}
                 found_flag = None
                 fruitless += 1
                 continue
-            validation = _validate_candidate_flag(
-                conversation_summary="\n\n".join(solve_log[-10:]),
+            validation = _run_self_verification(
                 candidate_flag=found_flag,
+                conversation_summary="\n\n".join(solve_log[-10:]),
                 ctf_name=ctf_name,
                 category=cat,
+                evidence_log=evidence_log,
+                solve_log=solve_log,
                 api_key=(api_key if _credit_remaining_usd(credit_guard) >= 0.12 else ""),
             )
             emit(
@@ -6240,6 +6750,8 @@ CTF:       {ctf_name or 'Unknown'}
                     "workspace": final_ws,
                     "flag_prefix": _infer_prefix_from_flag(found_flag) or "",
                 })
+                _kg_upsert_fact(ctf_name or "default", f"{cat}_last_flag_prefix", _infer_prefix_from_flag(found_flag) or "")
+                _kg_upsert_fact(ctf_name or "default", f"{cat}_last_strategy", strategy.get("mode", ""))
             except Exception as e:
                 log("warn", f"Memory store skipped: {e}", "")
             result("solved",found_flag,workspace=final_ws)
@@ -16359,7 +16871,12 @@ def main():
     try: payload=json.loads(sys.stdin.read())
     except Exception as e:
         log("err",f"Input error: {e}","red"); result("failed"); return
-    if payload.get("mode")=="import": run_import(payload)
-    else: run_solve(payload)
+    mode = payload.get("mode")
+    if mode == "import":
+        run_import(payload)
+    elif mode == "benchmark":
+        run_benchmark(payload)
+    else:
+        run_solve(payload)
 
 if __name__=="__main__": main()

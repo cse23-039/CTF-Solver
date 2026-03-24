@@ -56,6 +56,12 @@
     <span class="pb-label">reasoning</span>
     <span class="pb-val" id="pb-reasoning" title="Extended thinking level">off</span>
     <span class="pb-sep">│</span>
+    <span class="pb-label">confidence</span>
+    <span class="pb-val" id="pb-confidence" title="Live solver confidence">—</span>
+    <span class="pb-sep">│</span>
+    <span class="pb-label">strategy</span>
+    <span class="pb-val" id="pb-strategy" title="Current strategy mode">—</span>
+    <span class="pb-sep">│</span>
     <span class="pb-label">flag fmt</span>
     <span class="pb-val" id="pb-flagfmt" title="Auto-detected flag format">—</span>
     <span class="pb-sep">│</span>
@@ -657,6 +663,47 @@
               <option value="persistent">persistent — exhaust approach before pivoting</option>
             </select>
           </div>
+        </div>
+
+        <div class="sg-title">ADAPTIVE COMPUTE ALLOCATOR</div>
+        <div class="toggles-grid">
+          <label class="toggle-row">
+            <input type="checkbox" id="s-adaptive-allocator" checked>
+            <span class="toggle-label">Enable adaptive queue allocator</span>
+            <span class="toggle-hint">Ranks challenges by expected value and adjusts per-challenge spend/depth dynamically.</span>
+          </label>
+        </div>
+
+        <div class="sg-title">HUMAN-IN-THE-LOOP CONTROLS</div>
+        <div class="toggles-grid">
+          <label class="toggle-row">
+            <input type="checkbox" id="s-human-approve-pivot">
+            <span class="toggle-label">Require pivot approval</span>
+            <span class="toggle-hint">Solver emits pivot request events and avoids automatic pivots until approved for that run.</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="s-lock-strategy">
+            <span class="toggle-label">Lock strategy mode</span>
+            <span class="toggle-hint">Force a stable strategy profile across the run for controlled experimentation.</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="s-force-local-only">
+            <span class="toggle-label">Force local-only execution</span>
+            <span class="toggle-hint">Disables network-heavy tools and keeps analysis local to attachments/workspace.</span>
+          </label>
+        </div>
+        <div class="form-group" style="margin-top:8px">
+          <label class="form-label">LOCKED STRATEGY MODE</label>
+          <select class="form-ctrl" id="s-locked-strategy-mode">
+            <option value="">auto (use category playbook)</option>
+            <option value="general-evidence">general-evidence</option>
+            <option value="binary-exploit">binary-exploit</option>
+            <option value="dynamic-web">dynamic-web</option>
+            <option value="symbolic-crypto">symbolic-crypto</option>
+            <option value="rev-static-dynamic">rev-static-dynamic</option>
+            <option value="artifact-forensics">artifact-forensics</option>
+            <option value="memory-guarded-verification">memory-guarded-verification</option>
+          </select>
         </div>
 
         <div class="sg-title">WRITEUP STYLE</div>

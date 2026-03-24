@@ -59,6 +59,11 @@ const DEFAULTS = {
   systemPrompt:    '',
   analysisDepth:   'thorough',
   pivot:           'auto',
+  adaptiveAllocator: true,
+  humanApprovePivot: false,
+  lockStrategy: false,
+  lockedStrategyMode: '',
+  forceLocalOnly: false,
   writeupDetail:   'normal',
   writeupStyle:    'technical',
   extraInstructions: '',
@@ -142,6 +147,22 @@ function _fmtBytes(bytes) {
   if (b < 1024) return `${b}B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)}KB`;
   return `${(b / (1024 * 1024)).toFixed(2)}MB`;
+}
+
+function _difficultyWeight(difficulty) {
+  const d = String(difficulty || 'medium').toLowerCase();
+  if (d === 'easy') return 1.2;
+  if (d === 'hard') return 0.82;
+  if (d === 'insane') return 0.62;
+  return 1.0;
+}
+
+function _expectedValueScore(challenge) {
+  const pts = Number(challenge?.points || 100);
+  const diffW = _difficultyWeight(challenge?.difficulty);
+  const cat = String(challenge?.category || '').toLowerCase();
+  const catBonus = /crypto|reverse|binary|pwn/.test(cat) ? 1.05 : 1.0;
+  return Math.max(0.05, (pts / 100) * diffW * catBonus);
 }
 
 function renderAttachmentList() {
@@ -304,6 +325,8 @@ function applyAll() {
   if (!_runtimeInterval) {
     const rt=g('pb-runtime'); if(rt) rt.textContent='—';
     const rs=g('pb-reasoning'); if(rs){ rs.textContent='off'; rs.style.color=''; }
+    const cf=g('pb-confidence'); if(cf){ cf.textContent='—'; cf.style.color=''; }
+    const sm=g('pb-strategy'); if(sm){ sm.textContent='—'; sm.style.color=''; }
   }
   if (!_runtimeInterval && !queueState.running) {
     resetCreditDisplay();
@@ -657,10 +680,12 @@ async function solveCh(c) {
 
   const configuredChallengeCap = Math.max(0.25, Number(settings.creditBudgetUsd || DEFAULTS.creditBudgetUsd));
   const queueCapEnabled = queueState.running && Number(settings.ctfCreditBudgetUsd || 0) > 0;
+  const allocatedCap = Number(queueState.allocatedBudgetById?.[c.id] || configuredChallengeCap);
   const queueRemainingCap = queueCapEnabled
     ? Math.max(0.0, Number(queueState.creditRemainingUsd || 0))
-    : configuredChallengeCap;
-  const effectiveCreditCap = Math.max(0.25, Math.min(configuredChallengeCap, queueRemainingCap));
+    : allocatedCap;
+  const effectiveCreditCap = Math.max(0.25, Math.min(configuredChallengeCap, allocatedCap, queueRemainingCap));
+  const queueExpectedValue = Number(queueState.expectedValueById?.[c.id] || _expectedValueScore(c));
 
   creditState.challengeId = c.id;
   creditState.challengeName = c.name;
@@ -709,6 +734,12 @@ async function solveCh(c) {
         lowCreditThresholdUsd: creditState.lowThresholdUsd,
         enforceCreditBudget: settings.enforceCreditBudget !== false,
         conservativeCredits: settings.conservativeCredits !== false,
+        adaptiveAllocator: settings.adaptiveAllocator !== false,
+        queueExpectedValue,
+        humanApprovePivot: !!settings.humanApprovePivot,
+        lockStrategy: !!settings.lockStrategy,
+        lockedStrategyMode: settings.lockedStrategyMode || '',
+        forceLocalOnly: !!settings.forceLocalOnly,
         hints: {
           'Binary Exploitation': settings.hintPwn,
           'Cryptography':        settings.hintCrypto,
@@ -965,6 +996,11 @@ const App = {
     if(settings.retryFailed) statuses.push('failed');
     const queue=challenges.filter(c=>statuses.includes(c.status));
     if(!queue.length){ addLog('warn','No unsolved challenges.'); return; }
+
+    if (settings.adaptiveAllocator !== false) {
+      queue.sort((a, b) => _expectedValueScore(b) - _expectedValueScore(a));
+    }
+
     addLog('sys',`Queuing ${queue.length} challenge(s)...`,'bright');
     queue.forEach(c=>{ if(c.status!=='solving') c.status='queued'; });
     renderList(); updateStats();
@@ -974,6 +1010,31 @@ const App = {
     queueState.cancelled = false;
     queueState.creditSpentUsd = 0;
     queueState.creditRemainingUsd = Number(settings.ctfCreditBudgetUsd || 0);
+    queueState.expectedValueById = {};
+    queueState.allocatedBudgetById = {};
+
+    const basePerChallengeCap = Math.max(0.25, Number(settings.creditBudgetUsd || DEFAULTS.creditBudgetUsd));
+    const queueBudget = Number(settings.ctfCreditBudgetUsd || 0);
+    const adaptive = settings.adaptiveAllocator !== false;
+    const evPairs = queue.map(c => ({ id: c.id, ev: _expectedValueScore(c) }));
+    const evTotal = evPairs.reduce((s, r) => s + r.ev, 0) || 1;
+    evPairs.forEach(({ id, ev }) => { queueState.expectedValueById[id] = ev; });
+
+    if (adaptive && queueBudget > 0) {
+      for (const c of queue) {
+        const ev = Number(queueState.expectedValueById[c.id] || 1);
+        const proportional = (ev / evTotal) * queueBudget;
+        const floor = Math.min(basePerChallengeCap, Math.max(0.25, queueBudget / Math.max(1, queue.length) * 0.55));
+        const cap = Math.max(0.25, Math.min(basePerChallengeCap * 1.8, Math.max(floor, proportional)));
+        queueState.allocatedBudgetById[c.id] = Number(cap.toFixed(4));
+      }
+      addLog('sys', `[ALLOC] Adaptive allocator active: queue budget ${_fmtUsd(queueBudget)} distributed by expected value.`, 'bright');
+    } else {
+      for (const c of queue) {
+        queueState.allocatedBudgetById[c.id] = basePerChallengeCap;
+      }
+    }
+
     if (Number(settings.ctfCreditBudgetUsd || 0) > 0) {
       addLog('sys', `[CREDIT] Solve All budget set to ${_fmtUsd(settings.ctfCreditBudgetUsd)} total.`, 'bright');
     }
@@ -1190,6 +1251,11 @@ const App = {
     sv('s-system-prompt',     settings.systemPrompt);
     sv('s-analysis-depth',    settings.analysisDepth);
     sv('s-pivot',             settings.pivot);
+    sc('s-adaptive-allocator', settings.adaptiveAllocator !== false);
+    sc('s-human-approve-pivot', !!settings.humanApprovePivot);
+    sc('s-lock-strategy', !!settings.lockStrategy);
+    sv('s-locked-strategy-mode', settings.lockedStrategyMode || '');
+    sc('s-force-local-only', !!settings.forceLocalOnly);
     sv('s-writeup-detail',    settings.writeupDetail);
     sv('s-writeup-style',     settings.writeupStyle);
     sv('s-extra-instructions',settings.extraInstructions);
@@ -1308,6 +1374,11 @@ const App = {
     settings.systemPrompt      = gv('s-system-prompt').trim();
     settings.analysisDepth     = gv('s-analysis-depth');
     settings.pivot             = gv('s-pivot');
+    settings.adaptiveAllocator = gc('s-adaptive-allocator');
+    settings.humanApprovePivot = gc('s-human-approve-pivot');
+    settings.lockStrategy      = gc('s-lock-strategy');
+    settings.lockedStrategyMode = gv('s-locked-strategy-mode');
+    settings.forceLocalOnly    = gc('s-force-local-only');
     settings.writeupDetail     = gv('s-writeup-detail');
     settings.writeupStyle      = gv('s-writeup-style');
     settings.extraInstructions = gv('s-extra-instructions').trim();
@@ -2104,6 +2175,33 @@ listen('solver-log', event => {
     } else if (e.action === 'throttle') {
       addLog('sys', `[CREDIT] Throttle ${e.from_model||'?'} → ${e.to_model||'?'} | ${e.from_tokens||'?'} → ${e.to_tokens||'?'} tokens`, 'dim');
     }
+
+  } else if(e.type==='strategy') {
+    const sm = g('pb-strategy');
+    if (sm) {
+      sm.textContent = e.mode || '—';
+      sm.style.color = e.pivot ? 'var(--accent)' : 'var(--text-mid)';
+      sm.title = `base=${e.base_mode||'?'} reason=${e.reason||''}`;
+    }
+
+  } else if(e.type==='explainability' && e.event==='iteration_state') {
+    const cf = g('pb-confidence');
+    if (cf) {
+      const route = Number(e.route_score || 0);
+      const confidence = Math.max(0, Math.min(99, Math.round(100 - route * 0.55)));
+      cf.textContent = `${confidence}%`;
+      cf.style.color = confidence >= 70 ? 'var(--text-bright)' : confidence >= 45 ? 'var(--text-mid)' : 'var(--accent)';
+      cf.title = `route_score=${route} evidence=${e.evidence_count||0}`;
+    }
+
+  } else if(e.type==='pivot_request') {
+    addLog('warn', `[HITL] Pivot approval requested: mode=${e.mode||'?'} reason=${e.reason||'n/a'}`);
+
+  } else if(e.type==='multimodal_ingest') {
+    addLog('sys', `[MM] modalities=${(e.modalities||[]).join(',') || 'text-only'} attachments=${e.attachment_count||0}`, 'dim');
+
+  } else if(e.type==='strategy_playbook') {
+    addLog('sys', `[PLAYBOOK] ${e.category||'general'} intensity=${e.intensity||'balanced'}`, 'dim');
 
   } else if(e.type==='model_switch') {
     // Live model + reasoning indicator in platform bar
