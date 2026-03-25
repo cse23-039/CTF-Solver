@@ -14,6 +14,16 @@ import sqlite3
 import time
 from typing import Any
 
+try:
+    import numpy as _np  # type: ignore
+except Exception:  # pragma: no cover
+    _np = None
+
+try:
+    import faiss as _faiss  # type: ignore
+except Exception:  # pragma: no cover
+    _faiss = None
+
 _DEFAULT_DB = os.path.expanduser("~/.ctf-solver/rag_corpus.sqlite3")
 
 
@@ -65,6 +75,7 @@ class RAGStore:
         self.db_path = db_path or _DEFAULT_DB
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_schema()
+        self._faiss_cache = None
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=8)
@@ -132,6 +143,47 @@ class RAGStore:
                 ORDER BY created_ts DESC LIMIT 2000
                 """
             ).fetchall()
+
+        # Optional FAISS fast path.
+        if _faiss is not None and _np is not None and rows:
+            try:
+                vecs = []
+                meta = []
+                for row in rows:
+                    emb = json.loads(row["embedding"])
+                    if not isinstance(emb, list):
+                        continue
+                    vecs.append(emb)
+                    meta.append(row)
+                if vecs and meta:
+                    arr = _np.asarray(vecs, dtype="float32")
+                    idx = _faiss.IndexFlatIP(arr.shape[1])
+                    idx.add(arr)
+                    q = _np.asarray([q_emb], dtype="float32")
+                    sims, ids = idx.search(q, min(max(1, int(top_k * 4)), len(meta)))
+                    faiss_out: list[dict[str, Any]] = []
+                    for sim, ridx in zip(sims[0], ids[0]):
+                        if int(ridx) < 0 or int(ridx) >= len(meta):
+                            continue
+                        if float(sim) < min_similarity:
+                            continue
+                        r = meta[int(ridx)]
+                        faiss_out.append(
+                            {
+                                "ctf_name": r["ctf_name"],
+                                "challenge_name": r["challenge_name"],
+                                "category": r["category"],
+                                "difficulty": r["difficulty"],
+                                "attack_technique": r["attack_technique"],
+                                "winning_tool_sequence": json.loads(r["winning_tool_sequence"] or "[]"),
+                                "solve_summary": r["solve_summary"][:800],
+                                "similarity": round(float(sim), 4),
+                            }
+                        )
+                    if faiss_out:
+                        return faiss_out[:top_k]
+            except Exception:
+                pass
 
         scored: list[tuple[float, dict]] = []
         for row in rows:

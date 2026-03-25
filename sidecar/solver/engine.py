@@ -1284,6 +1284,11 @@ def _run_solve_impl(payload):
     _thinking_tracker = None
     _DifficultyEstimator = None
     _rag_ingest_solved = None
+    _score_tool_novelty = None
+    _synthesize_branch_progress = None
+    _record_chain_edge = None
+    _fetch_live_writeup_hint = None
+    _score_flag_candidate = None
     try:
         from solver.unified_scorer import rank_branches as _rank_branches_live
     except Exception:
@@ -1365,6 +1370,26 @@ def _run_solve_impl(payload):
         from solver.rag_store import ingest_solved_challenge as _rag_ingest_solved
     except Exception:
         _rag_ingest_solved = None
+    try:
+        from solver.novelty_gate import score_tool_novelty as _score_tool_novelty
+    except Exception:
+        _score_tool_novelty = None
+    try:
+        from solver.branch_synthesis import synthesize_branch_progress as _synthesize_branch_progress
+    except Exception:
+        _synthesize_branch_progress = None
+    try:
+        from solver.exploit_chain import record_chain_edge as _record_chain_edge
+    except Exception:
+        _record_chain_edge = None
+    try:
+        from solver.live_intel import fetch_live_writeup_hint as _fetch_live_writeup_hint
+    except Exception:
+        _fetch_live_writeup_hint = None
+    try:
+        from flag.submit_guard import score_flag_candidate as _score_flag_candidate
+    except Exception:
+        _score_flag_candidate = None
 
     preflight = _run_self_healing_preflight(cat)
     emit(
@@ -1622,6 +1647,10 @@ def _run_solve_impl(payload):
                                 "solve_summary": f"Parallel branch winner. Flag={found_flag}",
                             })
                         try:
+                            _kg_upsert_fact(ctf_name or "default", f"{cat}_winning_writeup", f"Parallel solve via: {winning_hyp}")
+                        except Exception:
+                            pass
+                        try:
                             _KG_STORE.ingest_solve_record({
                                 "ctf_name": ctf_name,
                                 "challenge_name": name,
@@ -1654,6 +1683,27 @@ def _run_solve_impl(payload):
                         pass
                     result("solved", found_flag, workspace=ws)
                     return
+            if _synthesize_branch_progress and hypotheses:
+                try:
+                    synth = _synthesize_branch_progress(
+                        [
+                            {
+                                "branch": h,
+                                "wins": float(branch_stats.get(h, {}).get("wins", 0)),
+                                "pulls": float(branch_stats.get(h, {}).get("pulls", 1)),
+                                "quality": 0.5,
+                                "novelty": 0.5,
+                            }
+                            for h in hypotheses
+                        ],
+                        api_key=api_key,
+                    )
+                    if synth:
+                        rank_map = {str(x.get("branch", "")): float(x.get("score", 0.5)) for x in synth}
+                        planner_hypotheses.sort(key=lambda h: rank_map.get(str(h), 0.0), reverse=True)
+                        emit("branch_synthesis", ranked=synth[:4])
+                except Exception:
+                    pass
             log("sys","[PARALLEL] No branch found flag — continuing with full sequential solve","dim")
 
     # ── Sequential solve loop ────────────────────────────────────────────────
@@ -1703,6 +1753,14 @@ def _run_solve_impl(payload):
     bandit_updates = []
     debate_used = False
     debate_context = ""
+    novelty_min_score = float(extra.get("noveltyGateMinScore", 0.2))
+    novelty_gate_enabled = bool(extra.get("haikuNoveltyGate", True))
+    last_chain_tool = ""
+    last_chain_output = ""
+    last_iter_tool_set = set()
+    no_novel_thinking_streak = 0
+    live_hint_last_iter = 0
+    live_hint_cooldown = int(extra.get("liveHintCooldownIters", 3))
 
     policy_dir = os.path.join((final_ws or ws or base_dir or os.getcwd()), ".solver")
     telemetry_path = os.path.join(policy_dir, "iteration_telemetry.json")
@@ -1739,6 +1797,19 @@ def _run_solve_impl(payload):
     except Exception:
         pass
 
+    try:
+        d_corr = float(learned_overrides.get("difficulty_correction", 0.0)) if isinstance(learned_overrides, dict) else 0.0
+        d_order = ["easy", "medium", "hard", "insane"]
+        if diff in d_order and abs(d_corr) >= 0.35:
+            cur_idx = d_order.index(diff)
+            new_idx = max(0, min(3, int(round(cur_idx + d_corr))))
+            if new_idx != cur_idx:
+                prev_diff = diff
+                diff = d_order[new_idx]
+                emit("difficulty_recalibration", previous=prev_diff, corrected=diff, correction=round(d_corr, 3), category=cat)
+    except Exception:
+        pass
+
     attack_graph = None
     if _a_star_attack_path and _update_edge_success:
         attack_graph = {
@@ -1771,6 +1842,9 @@ def _run_solve_impl(payload):
                     "strategy_mode": strategy_history[-1].get("mode", "") if strategy_history else "",
                     "solved": status == "solved",
                     "has_flag": bool(solved_flag),
+                    "predicted_difficulty": challenge.get("difficulty", "medium"),
+                    "actual_iterations": iteration,
+                    "max_iterations": max_iterations,
                 })
             except Exception:
                 pass
@@ -2084,6 +2158,20 @@ def _run_solve_impl(payload):
             evidence_count=len(evidence_log),
             contradictions=memory_diag.get("contradictions", []),
         )
+        if _fetch_live_writeup_hint and fruitless >= 3 and (iteration - live_hint_last_iter) >= max(1, live_hint_cooldown):
+            try:
+                hint_block = _fetch_live_writeup_hint(
+                    challenge_name=name,
+                    challenge_description=augmented_desc,
+                    category=cat,
+                    ctf_name=ctf_name,
+                )
+                if hint_block:
+                    live_hint_last_iter = iteration
+                    messages.append({"role": "user", "content": "[LIVE WRITEUP INTEL]\n" + hint_block})
+                    emit("live_writeup_hint", iteration=iteration, fruitless=fruitless, injected=True)
+            except Exception:
+                pass
         if strategy.get("pivot") and (iteration - last_strategy_pivot_iter >= 2):
             pivot_reason = strategy.get("reason") or "adaptive-pivot"
             if human_loop.get("approve_pivot", False):
@@ -2338,6 +2426,30 @@ def _run_solve_impl(payload):
             non_tools = [b for b in ordered_content if getattr(b, "type", None) != "tool_use"]
             ordered_content = non_tools + ranked_blocks
 
+        cur_iter_tool_set = set([str(getattr(b, "name", "")) for b in ordered_content if getattr(b, "type", None) == "tool_use"])
+        novel_tool_actions = len([t for t in cur_iter_tool_set if t and t not in last_iter_tool_set])
+        if planned_model == _MODEL_OPUS and planned_use_thinking:
+            try:
+                if novel_tool_actions <= 0:
+                    no_novel_thinking_streak += 1
+                else:
+                    no_novel_thinking_streak = 0
+                usage_obj = getattr(resp, "usage", None)
+                out_toks = float(getattr(usage_obj, "output_tokens", 0) or 0) if usage_obj is not None else 0.0
+                consumed_ceiling = out_toks >= (0.95 * float(max(1, planned_max_tokens)))
+                if no_novel_thinking_streak >= 2:
+                    reduced = max(2048, int(planned_thinking_tokens * 0.5))
+                    emit("thinking_calibration", iteration=iteration, action="halve", from_tokens=planned_thinking_tokens, to_tokens=reduced, reason="no_novel_actions")
+                    planned_thinking_tokens = reduced
+                    no_novel_thinking_streak = 0
+                elif consumed_ceiling:
+                    boosted = min(16000, int(planned_thinking_tokens * 1.25))
+                    emit("thinking_calibration", iteration=iteration, action="boost", from_tokens=planned_thinking_tokens, to_tokens=boosted, reason="budget_ceiling_hit")
+                    planned_thinking_tokens = boosted
+            except Exception:
+                pass
+        last_iter_tool_set = cur_iter_tool_set
+
         for block in ordered_content:
             btype = getattr(block,"type",None)
 
@@ -2356,12 +2468,32 @@ def _run_solve_impl(payload):
 
             elif btype == "tool_use":
                 has_tool    = True
-                made_progress = True
                 tname,tinput,tid = block.name,block.input,block.id
                 tool_call_history.append(tname)
                 preview = json.dumps(tinput)
                 log("sys",f"→ {tname}({preview[:160]+'...' if len(preview)>160 else preview})","dim")
                 emit("tool_call", tool=tname, iteration=iteration)
+
+                if novelty_gate_enabled and _score_tool_novelty and tname not in ("submit_flag", "detect_flag_format"):
+                    try:
+                        novelty = _score_tool_novelty(
+                            tool_name=tname,
+                            tool_args=tinput if isinstance(tinput, dict) else {},
+                            recent_outputs=[str(e.get("output", "")) for e in evidence_log[-5:]],
+                            api_key=api_key,
+                        )
+                        emit("novelty_gate", iteration=iteration, tool=tname, score=novelty.get("information_gain", 0.0), blocked=bool(novelty.get("block", False)))
+                        if float(novelty.get("information_gain", 0.0)) < novelty_min_score or bool(novelty.get("block", False)):
+                            alt_tool = str(novelty.get("diversify_tool", "")).strip() or str((strategy.get("recommended_tools") or ["pre_solve_recon"])[0])
+                            alt_input = novelty.get("diversify_args", {}) if isinstance(novelty.get("diversify_args", {}), dict) else {}
+                            if alt_tool in TOOL_MAP and alt_tool != tname:
+                                emit("novelty_substitute", iteration=iteration, blocked_tool=tname, substitute_tool=alt_tool)
+                                tname = alt_tool
+                                tinput = alt_input
+                    except Exception:
+                        pass
+
+                made_progress = True
 
                 tool_ctx = {
                     "is_remote": bool(inst),
@@ -2475,6 +2607,21 @@ def _run_solve_impl(payload):
                     "extractable_facts": tool_grade.get("extractable_facts", []),
                     "noise_ratio": float(tool_grade.get("noise_ratio", 0.0)),
                 })
+                if _record_chain_edge and last_chain_tool:
+                    try:
+                        chain_edge = _record_chain_edge(
+                            _KG_STORE,
+                            ctf_name or "default",
+                            from_tool=last_chain_tool,
+                            from_output=last_chain_output,
+                            to_tool=tname,
+                            to_output=str(tout),
+                        )
+                        emit("exploit_chain", iteration=iteration, edge=chain_edge)
+                    except Exception:
+                        pass
+                last_chain_tool = tname
+                last_chain_output = str(tout)
                 tool_quality_log.append({
                     "iteration": iteration,
                     "tool": tname,
@@ -2482,6 +2629,20 @@ def _run_solve_impl(payload):
                     "noise_ratio": float(tool_grade.get("noise_ratio", 0.0)),
                     "contains_flag_signal": bool(tool_grade.get("contains_flag_signal", False)),
                 })
+                if bool(extra.get("haikuCommentary", True)) and _run_haiku_critic:
+                    try:
+                        cmt = _run_haiku_critic(
+                            model_reasoning=(solve_log[-1] if solve_log else ""),
+                            tool_results=[{"tool": tname, "output": str(tout)[:900]}],
+                            current_hypothesis=strategy.get("mode", ""),
+                            iteration=iteration,
+                            api_key=api_key,
+                        )
+                        note = str(cmt.get("critic_note", "")).strip()
+                        if note:
+                            emit("haiku_commentary", iteration=iteration, note=note)
+                    except Exception:
+                        pass
                 try:
                     evidence_ledger_path = _persist_evidence_record(final_ws or ws, {
                         "iteration": iteration,
@@ -2587,6 +2748,22 @@ def _run_solve_impl(payload):
                 found_flag = None
                 fruitless += 1
                 continue
+            if _score_flag_candidate:
+                try:
+                    guard = _score_flag_candidate(found_flag, ctf_name, evidence_log, solve_log)
+                    emit("flag_submit_guard", iteration=iteration, **guard)
+                    if not bool(guard.get("pass", False)):
+                        false_flag_candidates += 1
+                        messages.append({"role": "user", "content":
+                            "[FLAG SUBMIT GUARD]\n"
+                            f"Blocked candidate flag. Scores: prefix={guard.get('prefix_score')} context={guard.get('context_score')} entropy={guard.get('entropy_score')} combined={guard.get('combined_score')}\n"
+                            "Collect stronger chain-of-custody evidence before trying to validate/submit."
+                        })
+                        found_flag = None
+                        fruitless += 1
+                        continue
+                except Exception:
+                    pass
             validation = _run_self_verification(
                 candidate_flag=found_flag,
                 conversation_summary="\n\n".join(solve_log[-10:]),
@@ -2670,6 +2847,7 @@ def _run_solve_impl(payload):
                 })
                 _kg_upsert_fact(ctf_name or "default", f"{cat}_last_flag_prefix", _infer_prefix_from_flag(found_flag) or "")
                 _kg_upsert_fact(ctf_name or "default", f"{cat}_last_strategy", strategy.get("mode", ""))
+                _kg_upsert_fact(ctf_name or "default", f"{cat}_winning_writeup", summary[:2000])
                 if _rag_ingest_solved:
                     _rag_ingest_solved({
                         "ctf_name": ctf_name,

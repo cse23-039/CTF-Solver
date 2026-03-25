@@ -31,6 +31,14 @@ def _norm_cat(category: str) -> str:
     return "web"
 
 
+_DIFF_ORDER = ["easy", "medium", "hard", "insane"]
+
+
+def _diff_idx(v: str) -> int:
+    v2 = str(v or "medium").lower()
+    return _DIFF_ORDER.index(v2) if v2 in _DIFF_ORDER else 1
+
+
 def _load(path: str, fallback: Any) -> Any:
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -76,6 +84,21 @@ def retrain_priors(telemetry_path: str, priors_path: str) -> dict[str, Any]:
         avg_fruitless = statistics.mean([float(x.get("fruitless", 0.0)) for x in items])
         avg_failures = statistics.mean([float(x.get("tool_failures", 0.0)) for x in items])
         avg_route = statistics.mean([float(x.get("route_score", 50.0)) for x in items])
+        diffs = []
+        for x in items:
+            if "predicted_difficulty" in x and "actual_iterations" in x and "max_iterations" in x:
+                p = _diff_idx(str(x.get("predicted_difficulty", "medium")))
+                frac = float(x.get("actual_iterations", 0.0)) / max(1.0, float(x.get("max_iterations", 1.0)))
+                if frac >= 0.85:
+                    a = 3
+                elif frac >= 0.6:
+                    a = 2
+                elif frac >= 0.3:
+                    a = 1
+                else:
+                    a = 0
+                diffs.append(a - p)
+        difficulty_correction = statistics.mean(diffs) if diffs else 0.0
 
         # Learned threshold calibration curves (bounded).
         route_escalate = max(52, min(82, int(avg_route - 3 + (8 * (1.0 - solve_rate)))))
@@ -90,6 +113,7 @@ def retrain_priors(telemetry_path: str, priors_path: str) -> dict[str, Any]:
             "pivot_tool_failures": pivot_tool_failures,
             "confidence_decay_fruitless": round(max(0.04, min(0.16, 0.06 + (avg_fruitless * 0.02))), 4),
             "confidence_decay_tool_failures": round(max(0.06, min(0.22, 0.09 + (avg_failures * 0.025))), 4),
+            "difficulty_correction": round(float(difficulty_correction), 3),
             "observations": len(items),
             "solve_rate": round(solve_rate, 4),
         }
