@@ -1,0 +1,12 @@
+{
+  "candidate_flag": "",
+  "replay_script": "",
+  "artifact_checks": [],
+  "verdict": "fail",
+  "required": [
+    "replay script",
+    "expected output",
+    "artifact checksum",
+    "path evidence"
+  ]
+}

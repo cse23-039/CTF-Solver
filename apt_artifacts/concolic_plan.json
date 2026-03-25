@@ -1,0 +1,45 @@
+{
+  "engine_order": [
+    "angr",
+    "manticore",
+    "triton",
+    "fuzzing",
+    "z3"
+  ],
+  "switch_conditions": {
+    "path_stall": "no_new_paths >= 3",
+    "solver_timeout": "z3_timeout > 20s",
+    "coverage_plateau": "coverage_delta < 1% over 5 rounds"
+  },
+  "binary_path": "",
+  "find_addr": "",
+  "avoid_addrs": [],
+  "execution_recipe": [
+    {
+      "step": "angr_solve",
+      "input": {
+        "binary_path": "",
+        "find_addr": "",
+        "avoid_addrs": []
+      }
+    },
+    {
+      "step": "execute_shell",
+      "input": {
+        "command": "python3 -c \"import manticore\" 2>/dev/null || echo manticore_missing\""
+      }
+    },
+    {
+      "step": "execute_shell",
+      "input": {
+        "command": "python3 -c \"import triton\" 2>/dev/null || echo triton_missing\""
+      }
+    },
+    {
+      "step": "z3_solve",
+      "input": {
+        "constraints_code": "from z3 import *\nx=BitVec('x',32)\ns=Solver(); s.add(x>0); print(s.check()); print(s.model())"
+      }
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "root": "solve_challenge",
+  "subtasks": [
+    {
+      "id": "t1",
+      "name": "recon",
+      "depends_on": []
+    },
+    {
+      "id": "t2",
+      "name": "hypothesis_generation",
+      "depends_on": [
+        "t1"
+      ]
+    },
+    {
+      "id": "t3",
+      "name": "exploit_attempts_parallel",
+      "depends_on": [
+        "t2"
+      ]
+    },
+    {
+      "id": "t4",
+      "name": "validation_and_replay",
+      "depends_on": [
+        "t3"
+      ]
+    },
+    {
+      "id": "t5",
+      "name": "writeup_generation",
+      "depends_on": [
+        "t4"
+      ]
+    }
+  ],
+  "merge_strategy": "weighted_evidence_union",
+  "context": {
+    "category": "Unknown",
+    "description": ""
+  }
+}

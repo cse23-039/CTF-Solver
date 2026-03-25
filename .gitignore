@@ -1,0 +1,15 @@
+.history/
+
+__pycache__/
+*.pyc
+
+# Temporary snippet drops / local experiments
+changes/
+
+# Solver runtime artifacts
+.solver/
+*.jsonl
+
+# Virtual envs
+.venv/
+venv/
