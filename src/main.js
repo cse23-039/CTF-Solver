@@ -259,13 +259,11 @@ function renderDetails() {
   if (!selectedId) {
     fill.textContent = '────────────────────────────────────────────────────────────────────';
     if (wsBtn) wsBtn.style.display='none';
-    body.innerHTML = `<div class="empty-state"><pre class="empty-art">
-  ██████╗ ████████╗███████╗
-  ██╔════╝ ╚══██╔══╝██╔════╝
-  ██║         ██║   █████╗
-  ██║         ██║   ██╔══╝
-  ╚██████╗    ██║   ██║
-   ╚═════╝    ╚═╝   ╚═╝</pre><span>select a challenge</span></div>`;
+    body.innerHTML = `<div class="empty-state"><pre class="empty-art empty-art-3d">
+╔══════════════════════════════════════╗
+║             ROOT RUNNER              ║
+╚══════════════════════════════════════╝
+</pre><span>select a challenge</span></div>`;
     return;
   }
   const c = ch(selectedId); if (!c) return;
