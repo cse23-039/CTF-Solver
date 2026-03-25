@@ -280,6 +280,24 @@ def generate_writeup(client, model, challenge, flag, solve_summary, workspace, e
 
     - Model routing decisions:
     {json.dumps(evidence_bundle.get('route_history', [])[-12:], ensure_ascii=False)[:3000]}
+
+    - Strategy decisions:
+    {json.dumps(evidence_bundle.get('strategy_history', [])[-16:], ensure_ascii=False)[:3500]}
+
+    - Hypothesis trace (active/disproven/validated):
+    {json.dumps(evidence_bundle.get('hypothesis_trace', [])[:20], ensure_ascii=False)[:3500]}
+
+    - Tool quality grades:
+    {json.dumps(evidence_bundle.get('tool_quality_log', [])[-40:], ensure_ascii=False)[:3500]}
+
+    - Bandit updates:
+    {json.dumps(evidence_bundle.get('bandit_updates', [])[-60:], ensure_ascii=False)[:3500]}
+
+    - Difficulty re-estimation events:
+    {json.dumps(evidence_bundle.get('difficulty_events', [])[-8:], ensure_ascii=False)[:2000]}
+
+    - Self-play debate context:
+    {str(evidence_bundle.get('debate_context', ''))[:1600]}
     """
 
         prompt = f"""Write a {"comprehensive, detailed" if detail=="detailed" else "concise"} CTF writeup in Markdown.

@@ -1,3 +1,9 @@
+"""Cross-CTF knowledge graph with similarity search.
+
+Enhancement 4: Extends the existing per-CTF KnowledgeGraphStore with
+cross-CTF pattern queries — finds matching exploit techniques, vulnerability
+classes, and flag prefixes across ALL past CTFs, not just the current one.
+"""
 from __future__ import annotations
 
 import os
@@ -36,8 +42,7 @@ class KnowledgeGraphStore:
 
     def _init_schema(self) -> None:
         with self._conn() as conn:
-            conn.execute(
-                """
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS facts (
                     ctf_key TEXT NOT NULL,
                     fact_key TEXT NOT NULL,
@@ -45,10 +50,8 @@ class KnowledgeGraphStore:
                     updated_ts INTEGER NOT NULL,
                     PRIMARY KEY (ctf_key, fact_key)
                 )
-                """
-            )
-            conn.execute(
-                """
+            """)
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS edges (
                     ctf_key TEXT NOT NULL,
                     source_node TEXT NOT NULL,
@@ -56,10 +59,8 @@ class KnowledgeGraphStore:
                     rel TEXT NOT NULL,
                     created_ts INTEGER NOT NULL
                 )
-                """
-            )
-            conn.execute(
-                """
+            """)
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS cross_ctf_patterns (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     category TEXT NOT NULL,
@@ -70,8 +71,7 @@ class KnowledgeGraphStore:
                     frequency INTEGER DEFAULT 1,
                     last_seen_ts INTEGER NOT NULL
                 )
-                """
-            )
+            """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_edges_ctf ON edges(ctf_key)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_ctf ON facts(ctf_key)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_patterns_cat ON cross_ctf_patterns(category, pattern_key)")
@@ -80,16 +80,13 @@ class KnowledgeGraphStore:
         k = _kgkey(ctf_name)
         ts = int(time.time())
         with self._conn() as conn:
-            conn.execute(
-                """
+            conn.execute("""
                 INSERT INTO facts(ctf_key, fact_key, fact_value, updated_ts)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(ctf_key, fact_key) DO UPDATE SET
                     fact_value = excluded.fact_value,
                     updated_ts = excluded.updated_ts
-                """,
-                (k, key, str(value), ts),
-            )
+            """, (k, key, str(value), ts))
             conn.execute(
                 "INSERT INTO edges(ctf_key, source_node, target_node, rel, created_ts) VALUES (?, ?, ?, ?, ?)",
                 (k, f"ctf:{k}", f"fact:{k}:{key}", "has_fact", ts),
@@ -103,14 +100,14 @@ class KnowledgeGraphStore:
                 challenge_name=key,
             )
 
-    def query_context(self, ctf_name: str, query_terms: set[str], max_items: int = 8) -> list[str]:
+    def query_context(self, ctf_name: str, query_terms: set[str],
+                      max_items: int = 8) -> list[str]:
         k = _kgkey(ctf_name)
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT fact_key, fact_value FROM facts WHERE ctf_key = ? ORDER BY updated_ts DESC LIMIT 400",
                 (k,),
             ).fetchall()
-
         out: list[tuple[int, str]] = []
         for row in rows:
             fk = str(row["fact_key"])
@@ -129,10 +126,7 @@ class KnowledgeGraphStore:
                 "SELECT fact_key, fact_value FROM facts WHERE ctf_key = ? ORDER BY updated_ts DESC LIMIT ?",
                 (k, int(limit)),
             ).fetchall()
-        out: dict[str, str] = {}
-        for row in rows:
-            out[str(row["fact_key"])] = str(row["fact_value"])
-        return out
+        return {str(row["fact_key"]): str(row["fact_value"]) for row in rows}
 
     def _infer_category_from_key(self, key: str) -> str:
         key_lower = key.lower()
@@ -153,74 +147,61 @@ class KnowledgeGraphStore:
                                    challenge_name: str) -> None:
         ts = int(time.time())
         with self._conn() as conn:
-            existing = conn.execute(
-                """
+            existing = conn.execute("""
                 SELECT id, frequency FROM cross_ctf_patterns
                 WHERE category = ? AND pattern_key = ? AND pattern_value = ?
-                """,
-                (category, pattern_key, str(pattern_value)[:500]),
-            ).fetchone()
+            """, (category, pattern_key, str(pattern_value)[:500])).fetchone()
             if existing:
-                conn.execute(
-                    """
+                conn.execute("""
                     UPDATE cross_ctf_patterns
                     SET frequency = frequency + 1, last_seen_ts = ?
                     WHERE id = ?
-                    """,
-                    (ts, existing["id"]),
-                )
+                """, (ts, existing["id"]))
             else:
-                conn.execute(
-                    """
+                conn.execute("""
                     INSERT INTO cross_ctf_patterns
                       (category, pattern_key, pattern_value, ctf_name, challenge_name, frequency, last_seen_ts)
                     VALUES (?, ?, ?, ?, ?, 1, ?)
-                    """,
-                    (category, pattern_key, str(pattern_value)[:500], ctf_name, challenge_name, ts),
-                )
+                """, (category, pattern_key, str(pattern_value)[:500], ctf_name, challenge_name, ts))
 
     def cross_ctf_pattern_query(self, category: str = "",
                                  technique_hint: str = "",
                                  limit: int = 8) -> list[dict[str, Any]]:
+        """Search across ALL past CTFs for matching patterns."""
         with self._conn() as conn:
             if category and technique_hint:
-                rows = conn.execute(
-                    """
+                rows = conn.execute("""
                     SELECT category, pattern_key, pattern_value, ctf_name,
                            challenge_name, frequency, last_seen_ts
                     FROM cross_ctf_patterns
                     WHERE (category = ? OR category = 'general')
                       AND (pattern_value LIKE ? OR pattern_key LIKE ?)
                     ORDER BY frequency DESC, last_seen_ts DESC LIMIT ?
-                    """,
-                    (category.lower(), f"%{technique_hint}%", f"%{technique_hint}%", int(limit)),
-                ).fetchall()
+                """, (category.lower(), f"%{technique_hint}%",
+                      f"%{technique_hint}%", int(limit))).fetchall()
             elif category:
-                rows = conn.execute(
-                    """
+                rows = conn.execute("""
                     SELECT category, pattern_key, pattern_value, ctf_name,
                            challenge_name, frequency, last_seen_ts
                     FROM cross_ctf_patterns
                     WHERE category = ? OR category = 'general'
                     ORDER BY frequency DESC, last_seen_ts DESC LIMIT ?
-                    """,
-                    (category.lower(), int(limit)),
-                ).fetchall()
+                """, (category.lower(), int(limit))).fetchall()
             else:
-                rows = conn.execute(
-                    """
+                rows = conn.execute("""
                     SELECT category, pattern_key, pattern_value, ctf_name,
                            challenge_name, frequency, last_seen_ts
                     FROM cross_ctf_patterns
                     ORDER BY frequency DESC, last_seen_ts DESC LIMIT ?
-                    """,
-                    (int(limit),),
-                ).fetchall()
+                """, (int(limit),)).fetchall()
         return [dict(row) for row in rows]
 
     def render_cross_ctf_context(self, category: str = "",
                                   technique_hint: str = "") -> str:
-        patterns = self.cross_ctf_pattern_query(category=category, technique_hint=technique_hint, limit=6)
+        """Render cross-CTF patterns as a prompt injection block."""
+        patterns = self.cross_ctf_pattern_query(
+            category=category, technique_hint=technique_hint, limit=6,
+        )
         if not patterns:
             return ""
         lines = ["## Cross-CTF pattern intelligence (from past solves):"]
@@ -232,6 +213,7 @@ class KnowledgeGraphStore:
         return "\n".join(lines)
 
     def ingest_solve_record(self, record: dict[str, Any]) -> None:
+        """Bulk-ingest a solve record into the cross-CTF pattern table."""
         ctf = str(record.get("ctf_name", "unknown"))
         name = str(record.get("challenge_name", "unknown"))
         cat = str(record.get("category", "general")).lower().replace(" ", "_")

@@ -87,14 +87,19 @@ class ContextualBandit:
         return ranked
 
     def update(self, state: dict[str, Any], tool_name: str, success: bool) -> None:
+        self.update_weighted(state, tool_name, 1.0 if success else 0.0)
+
+    def update_weighted(self, state: dict[str, Any], tool_name: str, quality: float) -> None:
         ctx = self.context_key(state)
         arm = self.table.setdefault(ctx, {}).setdefault(tool_name, BetaArm())
         arm.alpha *= self.decay
         arm.beta *= self.decay
-        if success:
-            arm.alpha += 1.0
+        q = max(0.0, min(1.0, float(quality)))
+        if q > 0.0:
+            arm.alpha += q
+        if q < 1.0:
+            arm.beta += (1.0 - q)
+        if q >= 0.5:
             arm.wins += 1
-        else:
-            arm.beta += 1.0
         arm.pulls += 1
         arm.last_ts = int(time.time())

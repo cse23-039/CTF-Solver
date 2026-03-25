@@ -1057,6 +1057,34 @@ def _run_solve_impl(payload):
     kg_hits = _kg_query_context(ctf_name, kg_query_terms, max_items=8)
     if kg_hits:
         knowledge_ctx += "\n\n## Queried knowledge graph matches:\n" + "\n".join([f"  - {h}" for h in kg_hits])
+    cross_ctf_ctx = ""
+    try:
+        cross_ctf_ctx = _KG_STORE.render_cross_ctf_context(category=cat, technique_hint=" ".join(list(kg_query_terms)[:6]))
+    except Exception:
+        cross_ctf_ctx = ""
+    rag_ctx = ""
+    pre_fanout_hypotheses = []
+    try:
+        from solver.rag_store import render_rag_context as _render_rag_context
+        rag_ctx = _render_rag_context(description=augmented_desc, category=cat, top_k=int(extra.get("ragTopK", 3)))
+    except Exception:
+        rag_ctx = ""
+    try:
+        from solver.hypothesis_fanout import speculative_hypothesis_fanout as _speculative_fanout
+        from solver.hypothesis_fanout import render_fanout_for_prompt as _render_fanout_for_prompt_boot
+        pre_fanout_hypotheses = _speculative_fanout(
+            challenge_description=augmented_desc,
+            category=cat,
+            difficulty=diff,
+            rag_context=rag_ctx,
+            cross_ctf_context=cross_ctf_ctx,
+            api_key=api_key,
+        )
+        fanout_block = _render_fanout_for_prompt_boot(pre_fanout_hypotheses)
+        if fanout_block:
+            knowledge_ctx += "\n\n" + fanout_block
+    except Exception:
+        pre_fanout_hypotheses = []
     memory_hits = _retrieve_memory_v2(
         {
             **challenge,
@@ -1120,6 +1148,10 @@ def _run_solve_impl(payload):
         system = memory_ctx + "\n\n" + system
     if knowledge_ctx:
         system = knowledge_ctx + "\n\n" + system
+    if cross_ctf_ctx:
+        system = cross_ctf_ctx + "\n\n" + system
+    if rag_ctx:
+        system = rag_ctx + "\n\n" + system
 
     remaining_budget = _credit_remaining_usd(credit_guard)
     log("sys",f"{'WSL2' if IS_WINDOWS and USE_WSL else 'Win' if IS_WINDOWS else 'Linux'} | budget={max_iterations}iters | tools={len(active_tools)} | api_budget=${remaining_budget:.2f}","")
@@ -1187,6 +1219,10 @@ def _run_solve_impl(payload):
         pb.add(f"\n{memory_ctx}\n")
     if knowledge_ctx:
         pb.add(f"\n{knowledge_ctx}\n")
+    if cross_ctf_ctx:
+        pb.add(f"\n{cross_ctf_ctx}\n")
+    if rag_ctx:
+        pb.add(f"\n{rag_ctx}\n")
     pb.add("\n**METHODOLOGY**: planner+specialists → hypothesis tree + pruning → tool graph execution → parallel branches → autonomous recon→exploit→refine loop → validator gate → submit_flag → evidence-backed WRITEUP.md")
     pb.add("\n\n**CREDIT GUARD (MANDATORY)**: be frugal with API usage; prefer tool-driven/local reasoning first, minimize repeated long outputs, and avoid expensive model escalation unless evidence shows clear expected gain.")
     user_msg = pb.build()
@@ -1240,6 +1276,14 @@ def _run_solve_impl(payload):
     _allocate_budget = None
     _should_early_stop_branch = None
     _append_replay = None
+    _run_haiku_critic = None
+    _grade_tool_result = None
+    _quality_to_bandit_update = None
+    _run_self_play_debate = None
+    _render_debate_for_prompt = None
+    _thinking_tracker = None
+    _DifficultyEstimator = None
+    _rag_ingest_solved = None
     try:
         from solver.unified_scorer import rank_branches as _rank_branches_live
     except Exception:
@@ -1298,6 +1342,29 @@ def _run_solve_impl(payload):
         from solver.replay import append_replay as _append_replay
     except Exception:
         _append_replay = None
+    try:
+        from solver.haiku_critic import run_haiku_critic as _run_haiku_critic, grade_tool_result as _grade_tool_result, quality_to_bandit_update as _quality_to_bandit_update
+    except Exception:
+        _run_haiku_critic = None
+        _grade_tool_result = None
+        _quality_to_bandit_update = None
+    try:
+        from solver.self_play_debate import run_self_play_debate as _run_self_play_debate, render_debate_for_prompt as _render_debate_for_prompt
+    except Exception:
+        _run_self_play_debate = None
+        _render_debate_for_prompt = None
+    try:
+        from solver.thinking_budget import get_tracker as _thinking_tracker
+    except Exception:
+        _thinking_tracker = None
+    try:
+        from solver.difficulty_estimator import DifficultyEstimator as _DifficultyEstimator
+    except Exception:
+        _DifficultyEstimator = None
+    try:
+        from solver.rag_store import ingest_solved_challenge as _rag_ingest_solved
+    except Exception:
+        _rag_ingest_solved = None
 
     preflight = _run_self_healing_preflight(cat)
     emit(
@@ -1317,9 +1384,14 @@ def _run_solve_impl(payload):
     planner_summary = ""
     planner_evidence = []
     planner_outputs = {}
-    planner_hypotheses = []
+    planner_hypotheses = [h.get("hypothesis", "") for h in pre_fanout_hypotheses if h.get("hypothesis")][:5]
     planner_pruned = []
     bootstrap_artifacts = []
+    strategy_history = []
+    tool_quality_log = []
+    bandit_updates = []
+    difficulty_events = []
+    debate_context = ""
     planner_enabled = bool(extra.get("hierarchicalPlanner", True))
     if credit_guard.get("conservative", False) and _credit_remaining_usd(credit_guard) <= 3.0:
         planner_enabled = False
@@ -1328,7 +1400,7 @@ def _run_solve_impl(payload):
     try:
         if planner_enabled:
             planner = _run_hierarchical_planner(challenge_ctx, api_key, extra)
-            planner_hypotheses = planner.get("hypotheses", [])
+            planner_hypotheses = list(dict.fromkeys((planner_hypotheses + planner.get("hypotheses", []))))[:8]
             planner_pruned = planner.get("pruned", [])
             emit("planner", specialists=planner.get("specialists", []), hypothesis_count=len(planner_hypotheses))
 
@@ -1429,6 +1501,8 @@ def _run_solve_impl(payload):
             except Exception:
                 pass
         if not hypotheses:
+            hypotheses = [h.get("hypothesis", "") for h in pre_fanout_hypotheses if h.get("hypothesis")][:3]
+        if not hypotheses:
             # Fast hypothesis generation via Haiku fallback
             try:
                 hyp_plan = _plan_budgeted_call(
@@ -1510,6 +1584,12 @@ def _run_solve_impl(payload):
                                              "tool_evidence": planner_evidence,
                                              "failed_attempts": [],
                                              "route_history": [],
+                                             "strategy_history": strategy_history[-20:],
+                                             "hypothesis_trace": planner_hypotheses[:12],
+                                             "tool_quality_log": tool_quality_log[-40:],
+                                             "bandit_updates": bandit_updates[-60:],
+                                             "difficulty_events": difficulty_events[-8:],
+                                             "debate_context": debate_context,
                                          })
                     else:
                         log("warn", "Skipping LLM writeup to conserve remaining API credits.", "")
@@ -1530,6 +1610,28 @@ def _run_solve_impl(payload):
                             "reproducibility_count": 1,
                             "workspace": ws,
                         })
+                        if _rag_ingest_solved:
+                            _rag_ingest_solved({
+                                "ctf_name": ctf_name,
+                                "challenge_name": name,
+                                "category": cat,
+                                "difficulty": diff,
+                                "description_text": augmented_desc,
+                                "attack_technique": winning_hyp,
+                                "winning_tool_sequence": ["parallel_branches"],
+                                "solve_summary": f"Parallel branch winner. Flag={found_flag}",
+                            })
+                        try:
+                            _KG_STORE.ingest_solve_record({
+                                "ctf_name": ctf_name,
+                                "challenge_name": name,
+                                "category": cat,
+                                "attack_technique": winning_hyp,
+                                "winning_tool_sequence": ["parallel_branches"],
+                                "flag_prefix": _infer_prefix_from_flag(found_flag) or "",
+                            })
+                        except Exception:
+                            pass
                     except Exception as e:
                         log("warn", f"Memory store skipped: {e}", "")
                     try:
@@ -1594,6 +1696,13 @@ def _run_solve_impl(payload):
     false_flag_candidates = 0
     contradiction_penalty = len(memory_diag.get("contradictions", []))
     trusted_memory_hits_count = len(trusted_memory_hits)
+    thinking_tracker = _thinking_tracker() if _thinking_tracker else None
+    difficulty_estimator = _DifficultyEstimator(diff, max_iterations) if _DifficultyEstimator else None
+    difficulty_events = []
+    tool_quality_log = []
+    bandit_updates = []
+    debate_used = False
+    debate_context = ""
 
     policy_dir = os.path.join((final_ws or ws or base_dir or os.getcwd()), ".solver")
     telemetry_path = os.path.join(policy_dir, "iteration_telemetry.json")
@@ -1737,9 +1846,37 @@ def _run_solve_impl(payload):
             learned_overrides=learned_overrides,
             state_vector=state_vector,
         )
+        if difficulty_estimator and difficulty_estimator.should_reestimate(iteration):
+            try:
+                diff_evt = difficulty_estimator.reestimate(
+                    iteration=iteration,
+                    fruitless=fruitless,
+                    tool_failures=tool_failures,
+                    evidence_log=evidence_log,
+                    route_score=int(route_decision.get("route_score", 50)),
+                )
+                difficulty_events.append(diff_evt)
+                if diff_evt.get("changed"):
+                    diff = diff_evt.get("new_difficulty", diff)
+                    emit("difficulty_reestimate", **diff_evt)
+                    messages.append({"role": "user", "content":
+                        "[DYNAMIC DIFFICULTY RE-ESTIMATE]\n"
+                        f"{diff_evt.get('old_difficulty')} -> {diff_evt.get('new_difficulty')}\n"
+                        f"Reason: {diff_evt.get('reason')}\n"
+                        "Update strategy and model routing immediately."
+                    })
+            except Exception:
+                pass
         model = route_decision["model"]
         use_thinking = route_decision["use_thinking"]
         thinking_tokens = route_decision["thinking_tokens"]
+        if thinking_tracker and model == _MODEL_OPUS and use_thinking:
+            try:
+                adaptive_budget = thinking_tracker.next_budget(difficulty=diff, route_score=int(route_decision.get("route_score", 0)))
+                thinking_tokens = max(2048, min(int(thinking_tokens or adaptive_budget), int(adaptive_budget)))
+                emit("thinking_budget", iteration=iteration, route_score=route_decision.get("route_score", 0), tokens=thinking_tokens)
+            except Exception:
+                pass
         if model == _MODEL_OPUS and opus_budget_remaining > 0 and user_model != _MODEL_OPUS:
             opus_budget_remaining -= 1
         route_history.append({
@@ -1758,6 +1895,23 @@ def _run_solve_impl(payload):
             reasons=route_decision.get("reasons", []),
             opus_budget_remaining=opus_budget_remaining,
         )
+        if (not debate_used) and _run_self_play_debate and _render_debate_for_prompt and int(route_decision.get("route_score", 0)) >= 80:
+            try:
+                debate = _run_self_play_debate(
+                    challenge_description=augmented_desc,
+                    category=cat,
+                    difficulty=diff,
+                    recon_summary="\n".join(solve_log[-6:]),
+                    route_score=int(route_decision.get("route_score", 0)),
+                    api_key=api_key,
+                )
+                debate_context = _render_debate_for_prompt(debate)
+                if debate_context:
+                    debate_used = True
+                    messages.append({"role": "user", "content": "[SELF-PLAY DEBATE]\n" + debate_context})
+                    emit("self_play_debate", iteration=iteration, used=True, confidence=debate.get("confidence", 0), winning=debate.get("winning_approach", ""))
+            except Exception:
+                pass
         if _append_replay:
             try:
                 _append_replay(
@@ -2219,9 +2373,25 @@ def _run_solve_impl(payload):
                 if not tool_ok:
                     log("err", f"{tout} ({tool_reason})", "red")
                     tool_failures += 1
+                tool_grade = {
+                    "quality": 1.0 if tool_ok else 0.0,
+                    "extractable_facts": [],
+                    "noise_ratio": 0.5,
+                    "source": "binary_fallback",
+                }
+                if _grade_tool_result:
+                    try:
+                        tool_grade = _grade_tool_result(tool_name=tname, result_text=str(tout), category=cat, api_key=api_key)
+                    except Exception:
+                        pass
                 if bandit:
                     try:
-                        bandit.update(state_vector, tname, bool(tool_ok))
+                        q_score = float(tool_grade.get("quality", 1.0 if tool_ok else 0.0))
+                        if hasattr(bandit, "update_weighted"):
+                            bandit.update_weighted(state_vector, tname, q_score)
+                        else:
+                            bandit.update(state_vector, tname, bool(q_score >= 0.5))
+                        bandit_updates.append({"iteration": iteration, "tool": tname, "quality": round(q_score, 4)})
                     except Exception:
                         pass
                 if _append_replay:
@@ -2301,6 +2471,16 @@ def _run_solve_impl(payload):
                     "input": tinput,
                     "output": str(tout)[:2000],
                     "success": _tool_output_success(str(tout)),
+                    "quality": float(tool_grade.get("quality", 0.5)),
+                    "extractable_facts": tool_grade.get("extractable_facts", []),
+                    "noise_ratio": float(tool_grade.get("noise_ratio", 0.0)),
+                })
+                tool_quality_log.append({
+                    "iteration": iteration,
+                    "tool": tname,
+                    "quality": float(tool_grade.get("quality", 0.5)),
+                    "noise_ratio": float(tool_grade.get("noise_ratio", 0.0)),
+                    "contains_flag_signal": bool(tool_grade.get("contains_flag_signal", False)),
                 })
                 try:
                     evidence_ledger_path = _persist_evidence_record(final_ws or ws, {
@@ -2311,6 +2491,7 @@ def _run_solve_impl(payload):
                         "input": tinput,
                         "output": str(tout)[:4000],
                         "success": _tool_output_success(str(tout)),
+                        "quality": float(tool_grade.get("quality", 0.5)),
                         "route_score": route_decision.get("route_score", 0),
                     })
                 except Exception as e:
@@ -2351,6 +2532,39 @@ def _run_solve_impl(payload):
             solve_state.fruitless = fruitless
             solve_state.touch_no_progress()
             fruitless = solve_state.fruitless
+
+        if thinking_tracker and planned_model == _MODEL_OPUS and planned_use_thinking:
+            try:
+                thinking_tracker.record_call(
+                    thinking_tokens_used=int(planned_thinking_tokens),
+                    evidence_gained=(0.35 if made_progress else 0.0),
+                    model=planned_model,
+                    iteration=iteration,
+                )
+                emit("thinking_efficiency", iteration=iteration, **thinking_tracker.efficiency_summary())
+            except Exception:
+                pass
+
+        if _run_haiku_critic:
+            try:
+                critic_verdict = _run_haiku_critic(
+                    model_reasoning=(solve_log[-1] if solve_log else ""),
+                    tool_results=[{"tool": rec.get("tool", ""), "output": rec.get("output", "")} for rec in evidence_log[-4:]],
+                    current_hypothesis=(planner_hypotheses[0] if planner_hypotheses else strategy.get("mode", "")),
+                    iteration=iteration,
+                    api_key=api_key,
+                )
+                emit("critic_step", iteration=iteration, verdict=critic_verdict)
+                if bool(critic_verdict.get("recommended_pivot", False)):
+                    fruitless += 1
+                    messages.append({"role": "user", "content":
+                        "[HAIKU CRITIC VERDICT]\n"
+                        f"Pivot recommended: {critic_verdict.get('pivot_reason', '')}\n"
+                        f"Ignored evidence: {critic_verdict.get('ignored_evidence', [])}\n"
+                        "Change approach now and run a disconfirming test."
+                    })
+            except Exception:
+                pass
 
         # ── Flag found ───────────────────────────────────────────────────────
         if found_flag:
@@ -2426,6 +2640,11 @@ def _run_solve_impl(payload):
                                      "failed_attempts": pivot_events[-20:],
                                      "route_history": route_history[-20:],
                                      "strategy_history": strategy_history[-20:],
+                                     "hypothesis_trace": planner_hypotheses[:16],
+                                     "tool_quality_log": tool_quality_log[-80:],
+                                     "bandit_updates": bandit_updates[-120:],
+                                     "difficulty_events": difficulty_events[-8:],
+                                     "debate_context": debate_context,
                                  })
             else:
                 log("warn", "Skipping LLM writeup to preserve API credit budget.", "")
@@ -2451,6 +2670,28 @@ def _run_solve_impl(payload):
                 })
                 _kg_upsert_fact(ctf_name or "default", f"{cat}_last_flag_prefix", _infer_prefix_from_flag(found_flag) or "")
                 _kg_upsert_fact(ctf_name or "default", f"{cat}_last_strategy", strategy.get("mode", ""))
+                if _rag_ingest_solved:
+                    _rag_ingest_solved({
+                        "ctf_name": ctf_name,
+                        "challenge_name": name,
+                        "category": cat,
+                        "difficulty": diff,
+                        "description_text": augmented_desc,
+                        "attack_technique": strategy.get("mode", ""),
+                        "winning_tool_sequence": tool_call_history[-40:],
+                        "solve_summary": summary,
+                    })
+                try:
+                    _KG_STORE.ingest_solve_record({
+                        "ctf_name": ctf_name,
+                        "challenge_name": name,
+                        "category": cat,
+                        "attack_technique": strategy.get("mode", ""),
+                        "winning_tool_sequence": tool_call_history[-40:],
+                        "flag_prefix": _infer_prefix_from_flag(found_flag) or "",
+                    })
+                except Exception:
+                    pass
             except Exception as e:
                 log("warn", f"Memory store skipped: {e}", "")
             _finalize_policy_and_benchmark("solved", solved_flag=found_flag)
