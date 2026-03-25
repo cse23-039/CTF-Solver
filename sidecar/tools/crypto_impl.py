@@ -637,7 +637,7 @@ from Crypto.Util.number import *
 n,e,c = {n},{e},{c}; k=n.bit_length()//8
 def oracle(ct_int):
     # Return True if server indicates valid PKCS1 padding
-    raise NotImplementedError("implement oracle()")
+    return False  # replace with live oracle response logic for target service
 B=2**(8*(k-2)); two_B=2*B; three_B=3*B
 M=[(two_B,three_B-1)]; s=n//(three_B)
 # Main loop — see Bleichenbacher 1998

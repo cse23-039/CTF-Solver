@@ -33,14 +33,35 @@ fi
 SUDO=""
 [[ $EUID -ne 0 ]] && SUDO="sudo"
 
-apt_get()  { $SUDO apt-get install -y --no-install-recommends "$@" 2>/dev/null || warn "apt: failed: $*"; }
-pip_get()  { pip3 install --quiet --break-system-packages "$@" 2>/dev/null \
-             || pip3 install --quiet "$@" 2>/dev/null \
-             || warn "pip: failed: $*"; }
+apt_get()  {
+    local failed=()
+    for pkg in "$@"; do
+        $SUDO apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1 || failed+=("$pkg")
+    done
+    [[ ${#failed[@]} -gt 0 ]] && warn "apt: failed: ${failed[*]}"
+}
+pip_get()  {
+    if [[ "${1:-}" == "-r" && -n "${2:-}" ]]; then
+        python3 -m pip install --quiet --break-system-packages -r "$2" >/dev/null 2>&1 \
+            || python3 -m pip install --quiet -r "$2" >/dev/null 2>&1 \
+            || warn "pip: failed: -r $2"
+        return
+    fi
+    local failed=()
+    for pkg in "$@"; do
+        python3 -m pip install --quiet --break-system-packages "$pkg" >/dev/null 2>&1 \
+            || python3 -m pip install --quiet "$pkg" >/dev/null 2>&1 \
+            || failed+=("$pkg")
+    done
+    [[ ${#failed[@]} -gt 0 ]] && warn "pip: failed: ${failed[*]}"
+}
 gem_get()  { gem install --quiet "$@" 2>/dev/null || warn "gem: failed: $*"; }
 cargo_get(){ cargo install --quiet "$@" 2>/dev/null || warn "cargo: failed: $*"; }
 
 hdr "System update"
+$SUDO apt-get update -qq
+$SUDO apt-get install -y --no-install-recommends software-properties-common >/dev/null 2>&1 || true
+$SUDO add-apt-repository -y universe >/dev/null 2>&1 || true
 $SUDO apt-get update -qq
 
 # ─── 1. Base build tools ─────────────────────────────────────────────────────
@@ -121,11 +142,11 @@ apt_get \
 # ─── 7. Compression & archives ───────────────────────────────────────────────
 hdr "Compression & archive tools"
 apt_get \
-    7zip p7zip-full \
+    p7zip-full \
     unar \
     zip unzip \
     bzip2 \
-    lzma \
+    xz-utils \
     zstd \
     lz4
 
@@ -151,7 +172,7 @@ pip_get \
     pycryptodome cryptography \
     sympy "z3-solver" \
     gmpy2 hashpumpy \
-    rsactftool paddingoracle
+    RsaCtfTool paddingoracle
 
 # Binary exploitation
 pip_get \
@@ -171,8 +192,7 @@ pip_get \
     beautifulsoup4 lxml \
     httpx websockets websocket-client \
     scapy \
-    "jwt-tool" \
-    sqlmap
+    pyjwt
 
 # Forensics / image
 pip_get \
@@ -182,7 +202,7 @@ pip_get \
     pyzbar \
     peepdf \
     stegcracker \
-    regipy libscca-python \
+    regipy \
     yara-python
 
 # Network / SSH
@@ -194,6 +214,11 @@ pip_get \
     playwright chromadb \
     wasmtime \
     angr
+
+# Tools best installed from source
+if ! command -v jwt-tool &>/dev/null; then
+    pip_get "git+https://github.com/ticarpi/jwt_tool.git"
+fi
 
 ok "pip packages done"
 
@@ -208,7 +233,6 @@ ok "gems done"
 hdr "Node packages"
 npm install -g --quiet \
     js-beautify \
-    hermes-dec \
     2>/dev/null && ok "npm global packages done" || warn "npm: some packages failed"
 
 # ─── 12. Special tool installs ───────────────────────────────────────────────
@@ -278,9 +302,9 @@ if ! command -v apktool &>/dev/null; then
 else ok "apktool already installed"; fi
 
 # ── RsaCtfTool ───────────────────────────────────────────────────────────────
-if ! python3 -c "import rsactftool" 2>/dev/null && ! command -v RsaCtfTool &>/dev/null; then
+if ! command -v RsaCtfTool &>/dev/null; then
     log "RsaCtfTool..."
-    pip_get rsactftool && ok "RsaCtfTool (pip)" || {
+    pip_get RsaCtfTool && ok "RsaCtfTool (pip)" || {
         git clone --depth=1 https://github.com/RsaCtfTool/RsaCtfTool /opt/RsaCtfTool 2>/dev/null \
         && pip_get -r /opt/RsaCtfTool/requirements.txt \
         && $SUDO ln -sf /opt/RsaCtfTool/RsaCtfTool.py /usr/local/bin/RsaCtfTool \
@@ -392,7 +416,7 @@ chk "pikepdf"           "python3 -c 'import pikepdf'"
 chk "pyzbar"            "python3 -c 'from pyzbar.pyzbar import decode'"
 chk "blackboxprotobuf"  "python3 -c 'import blackboxprotobuf'"
 chk "basecrack"         "python3 -c 'import basecrack'"
-chk "rsactftool"        "python3 -c 'import rsactftool' 2>/dev/null || command -v RsaCtfTool"
+chk "rsactftool"        "command -v RsaCtfTool"
 chk "floss"             "command -v floss || python3 -m floss --help"
 chk "gdb"               "gdb --version"
 chk "pwndbg"            "grep -q pwndbg ~/.gdbinit"
@@ -429,6 +453,7 @@ chk "java"              "java -version"
 chk "rustc"             "rustc --version"
 chk "sqlmap"            "sqlmap --version"
 chk "stegcracker"       "command -v stegcracker || python3 -c 'import stegcracker'"
+chk "jwt-tool"          "command -v jwt-tool"
 
 echo ""
 ok "Install complete!"

@@ -1,6 +1,304 @@
 """Miscellaneous / utility tools."""
 from __future__ import annotations
-import re, subprocess, os, shutil, hashlib, json, threading
+import re, subprocess, os, shutil, hashlib, json, threading, time, base64, importlib
+import sys
+from pathlib import Path
+
+from tools.shell import (
+    IS_WINDOWS,
+    USE_WSL,
+    _w2l,
+    _shell,
+    emit,
+    log,
+    tool_execute_python,
+)
+from flag.extractor import extract_flag
+
+
+_PLATFORM_CONFIG: dict = {}
+
+
+def _json_result(tool: str, status: str = "ok", confidence: float = 0.8,
+                 artifacts: list[str] | None = None, next_action: str = "",
+                 output: object = "") -> str:
+    try:
+        payload = {
+            "tool": tool,
+            "status": status,
+            "confidence": round(max(0.0, min(1.0, float(confidence))), 3),
+            "artifacts": artifacts or [],
+            "next_action": next_action,
+            "output": output,
+        }
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        return str(output)
+
+
+_KG_PATH = os.path.expanduser("~/.ctf-solver/knowledge_graph.json")
+
+
+def _load_kg() -> dict:
+    try:
+        with open(_KG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_kg(data: dict) -> None:
+    os.makedirs(os.path.dirname(_KG_PATH), exist_ok=True)
+    with open(_KG_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def tool_knowledge_store(ctf_name: str, key: str, value: str) -> str:
+    ctf = (ctf_name or "unknown").strip() or "unknown"
+    k = (key or "").strip()
+    if not k:
+        return _json_result("knowledge_store", status="error", confidence=0.0,
+                            next_action="Provide a non-empty key.",
+                            output="missing key")
+    data = _load_kg()
+    bucket = data.setdefault(ctf, {})
+    bucket[k] = {"value": str(value), "ts": int(time.time())}
+    _save_kg(data)
+    return _json_result(
+        "knowledge_store",
+        confidence=0.95,
+        artifacts=[_KG_PATH],
+        next_action="Call knowledge_get at solve start to inject prior facts.",
+        output={"ctf_name": ctf, "key": k, "stored": True},
+    )
+
+
+def tool_knowledge_get(ctf_name: str) -> str:
+    ctf = (ctf_name or "unknown").strip() or "unknown"
+    data = _load_kg()
+    facts = data.get(ctf, {})
+    flat = {k: (v.get("value") if isinstance(v, dict) else v) for k, v in facts.items()}
+    return _json_result(
+        "knowledge_get",
+        confidence=0.9,
+        artifacts=[_KG_PATH] if os.path.exists(_KG_PATH) else [],
+        next_action="Use returned facts to prioritize likely attack vectors.",
+        output={"ctf_name": ctf, "count": len(flat), "facts": flat},
+    )
+
+
+def tool_detect_flag_format(ctf_name: str = "", description: str = "",
+                            platform_type: str = "", hint: str = "") -> str:
+    text = " ".join([ctf_name or "", description or "", hint or ""]).strip()
+    matches = re.findall(r"([A-Za-z0-9_]{2,24})\{", text)
+    prefix = ""
+    if hint and "{" in hint:
+        prefix = hint.split("{", 1)[0]
+    elif matches:
+        prefix = matches[0]
+    elif ctf_name:
+        m = re.search(r"([A-Za-z0-9_]+)", ctf_name)
+        prefix = m.group(1) if m else "flag"
+    else:
+        prefix = "flag"
+    prefix = prefix.strip("_") or "flag"
+    pattern = rf"{re.escape(prefix)}\{{[^\n\r\t\x00]{{4,200}}\}}"
+    example = f"{prefix}{{example_payload}}"
+    confidence = 0.95 if matches or (hint and "{" in hint) else 0.7
+    return _json_result(
+        "detect_flag_format",
+        confidence=confidence,
+        next_action="Use this regex in all grep/scan steps and re-run if prefix drifts.",
+        output={
+            "prefix": prefix,
+            "pattern": pattern,
+            "example": example,
+            "platform_type": platform_type or "unknown",
+            "source": "hint_or_description" if (matches or hint) else "heuristic",
+        },
+    )
+
+
+def tool_flag_extractor(text: str = "", file_path: str = "", ctf_name: str = "picoCTF",
+                        operation: str = "scan", patterns: list[str] | None = None) -> str:
+    raw = text or ""
+    if file_path:
+        try:
+            with open(file_path, "rb") as f:
+                blob = f.read()
+            raw = blob.decode("utf-8", errors="replace")
+        except Exception as e:
+            return _json_result("flag_extractor", status="error", confidence=0.0,
+                                next_action="Provide valid text or readable file path.",
+                                output=f"read failed: {e}")
+
+    rules = patterns or []
+    prefix = re.sub(r"[^A-Za-z0-9_]", "", (ctf_name or "flag").split()[0]) or "flag"
+    rules.extend([
+        rf"{re.escape(prefix)}\{{[^\n\r\t\x00]{{4,220}}\}}",
+        r"flag\{[^\n\r\t\x00]{4,220}\}",
+        r"ctf\{[^\n\r\t\x00]{4,220}\}",
+    ])
+
+    found: list[str] = []
+    for rgx in rules:
+        try:
+            found.extend(re.findall(rgx, raw, flags=re.IGNORECASE))
+        except Exception:
+            pass
+
+    if operation in ("scan", "find_encoded"):
+        chunks = re.findall(r"[A-Za-z0-9+/=]{24,}|[A-Fa-f0-9]{24,}", raw)
+        for chunk in chunks[:400]:
+            try:
+                if len(chunk) % 4 == 0 and re.fullmatch(r"[A-Za-z0-9+/=]+", chunk):
+                    dec = base64.b64decode(chunk + "===", validate=False).decode("utf-8", errors="ignore")
+                    found.extend(re.findall(rf"{re.escape(prefix)}\{{[^\n\r\t]{{4,220}}\}}", dec, flags=re.IGNORECASE))
+                if re.fullmatch(r"[A-Fa-f0-9]+", chunk) and len(chunk) % 2 == 0:
+                    dec2 = bytes.fromhex(chunk).decode("utf-8", errors="ignore")
+                    found.extend(re.findall(rf"{re.escape(prefix)}\{{[^\n\r\t]{{4,220}}\}}", dec2, flags=re.IGNORECASE))
+            except Exception:
+                pass
+
+    uniq = sorted({f.strip() for f in found if f and "{" in f and "}" in f})
+    return _json_result(
+        "flag_extractor",
+        confidence=0.9 if uniq else 0.5,
+        artifacts=[file_path] if file_path else [],
+        next_action="Validate top candidate with submit_flag.",
+        output={"matches": uniq[:30], "count": len(uniq)},
+    )
+
+
+def tool_pre_solve_recon(binary_path: str = "", url: str = "", category: str = "Unknown") -> str:
+    cat = (category or "unknown").lower()
+    findings: dict[str, str] = {}
+    artifacts: list[str] = []
+
+    def _run(cmd: str, timeout_s: int = 12) -> str:
+        try:
+            p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout_s)
+            out = (p.stdout or "") + (p.stderr or "")
+            return out[:2000]
+        except Exception as ex:
+            return f"command failed: {ex}"
+
+    if url:
+        try:
+            import requests
+            requests.packages.urllib3.disable_warnings()
+            r = requests.get(url, timeout=12, verify=False)
+            body = (r.text or "")[:3000]
+            links = sorted(set(re.findall(r'href=["\']([^"\']+)', body, flags=re.I)))[:40]
+            findings["http"] = f"HTTP {r.status_code} {r.reason} len={len(r.text)}"
+            findings["crawl"] = "\n".join(["links:"] + links)
+        except Exception as ex:
+            findings["http"] = f"request failed: {ex}"
+    if binary_path:
+        findings["file"] = _run(f"file '{binary_path}'")
+        findings["strings"] = _run(f"strings '{binary_path}' | head -80")
+        artifacts.append(binary_path)
+        if cat in ("pwn", "reverse", "rev", "binary"):
+            findings["checksec"] = _run(f"checksec --file='{binary_path}' 2>/dev/null || echo checksec_unavailable")
+            findings["functions"] = _run(f"nm '{binary_path}' 2>/dev/null | head -120")
+    if not findings:
+        return _json_result("pre_solve_recon", status="error", confidence=0.0,
+                            next_action="Provide binary_path and/or url.", output="no target")
+    return _json_result(
+        "pre_solve_recon",
+        confidence=0.88,
+        artifacts=artifacts,
+        next_action="Feed recon output into rank_hypotheses for ordered attack plan.",
+        output=findings,
+    )
+
+
+def tool_rank_hypotheses(challenge_description: str, category: str,
+                         recon_results: str, api_key: str = "") -> str:
+    text = (challenge_description or "") + "\n" + (recon_results or "")
+    cat = (category or "unknown").lower()
+    scored = []
+    candidates = [
+        ("sqli", ["sql", "union", "sqlite", "database"], ["sqlmap", "http_request"]),
+        ("ssti", ["template", "jinja", "twig", "render"], ["ssti_rce", "template_inject"]),
+        ("ssrf", ["fetch", "url=", "metadata", "localhost"], ["ssrf_chain", "http_request"]),
+        ("ret2libc", ["puts", "plt", "got", "libc"], ["libc_lookup", "rop_chain"]),
+        ("heap_uaf", ["malloc", "free", "tcache", "double free"], ["heap_analysis", "house_of_exploit"]),
+        ("rsa", ["rsa", "modulus", "ciphertext", "e="], ["rsa_toolkit", "factordb"]),
+        ("steg", ["image", "png", "lsb", "steg"], ["image_steg_advanced", "steg_brute"]),
+    ]
+    low = text.lower()
+    for name, keys, tools in candidates:
+        score = sum(1 for k in keys if k in low)
+        if cat and name.startswith(cat[:3]):
+            score += 1
+        if score > 0:
+            scored.append({"hypothesis": name, "score": score, "recommended_tools": tools})
+    if not scored:
+        scored = [{"hypothesis": "generic_recon", "score": 1,
+                   "recommended_tools": ["pre_solve_recon", "challenge_classifier", "flag_extractor"]}]
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return _json_result(
+        "rank_hypotheses",
+        confidence=0.84,
+        next_action="Execute top-ranked tool chain, then rerank with new evidence.",
+        output={"category": category, "ranked": scored[:5]},
+    )
+
+
+def tool_health_preflight(scope: str = "core") -> str:
+    scope = (scope or "core").lower()
+    shell_cmds = {
+        "core": ["python3", "bash", "curl", "strings", "file", "objdump", "tshark"],
+        "web": ["sqlmap", "ffuf", "nmap"],
+        "pwn": ["gdb", "ROPgadget", "checksec", "patchelf"],
+        "mobile": ["adb", "apktool", "jadx", "apksigner"],
+        "forensics": ["binwalk", "exiftool", "zbarimg", "foremost"],
+    }
+    py_mods = {
+        "core": ["requests", "z3", "sympy"],
+        "web": ["playwright", "jwt", "websocket"],
+        "pwn": ["pwn", "angr"],
+        "mobile": ["frida", "androguard"],
+        "forensics": ["PIL", "pyzbar"],
+    }
+    cmd_list = shell_cmds.get(scope, shell_cmds["core"])
+    mod_list = py_mods.get(scope, py_mods["core"])
+
+    cmd_status: dict[str, bool] = {}
+    for cmd in cmd_list:
+        cmd_status[cmd] = shutil.which(cmd) is not None
+
+    mod_status: dict[str, bool] = {}
+    for mod in mod_list:
+        try:
+            __import__(mod)
+            mod_status[mod] = True
+        except Exception:
+            mod_status[mod] = False
+
+    total = len(cmd_status) + len(mod_status)
+    ok = sum(1 for v in list(cmd_status.values()) + list(mod_status.values()) if v)
+    ratio = (ok / total) if total else 0.0
+    confidence = min(0.95, 0.76 + (0.2 * ratio))
+    unavailable = [k for k, v in {**cmd_status, **mod_status}.items() if not v]
+    next_action = "Install missing dependencies and re-run preflight." if unavailable else "Environment healthy."
+
+    return _json_result(
+        "health_preflight",
+        status="ok",
+        confidence=confidence,
+        next_action=next_action,
+        output={
+            "scope": scope,
+            "health_state": "healthy" if ratio >= 0.75 else "degraded",
+            "healthy_ratio": round(ratio, 3),
+            "commands": cmd_status,
+            "python_modules": mod_status,
+            "unavailable": unavailable,
+        },
+    )
 
 
 def tool_writeup_rag(description: str, category: str, ctf_name: str = "",
@@ -794,8 +1092,8 @@ def tool_ssh_exec(host: str, port: int = 22, username: str = "",
     kp = (_w2l(key_path) if (IS_WINDOWS and USE_WSL) else key_path) if key_path else ""
 
     try:
-        import paramiko
-    except ImportError:
+        paramiko = importlib.import_module("paramiko")
+    except Exception:
         return "paramiko not installed — run: pip install paramiko"
 
     def _client():
@@ -837,8 +1135,9 @@ def tool_ssh_exec(host: str, port: int = 22, username: str = "",
             return "Provide remote_path="
         lp = local_path or f"/tmp/scp_{os.path.basename(remote_path)}_{int(time.time())}"
         try:
-            from scp import SCPClient
-        except ImportError:
+            scp_mod = importlib.import_module("scp")
+            SCPClient = getattr(scp_mod, "SCPClient")
+        except Exception:
             # fallback: use paramiko SFTP
             try:
                 c = _client()

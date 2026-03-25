@@ -1,6 +1,37 @@
 """Mobile (Android / iOS) analysis tools."""
 from __future__ import annotations
-import re, subprocess, os, shutil, zipfile
+import re, subprocess, os, shutil, zipfile, time
+from tools.shell import _shell, _w2l, IS_WINDOWS, USE_WSL, tool_execute_python
+
+
+FRIDA_ANDROID_BYPASS = """Java.perform(function () {
+    try {
+        var CertificatePinner = Java.use('okhttp3.CertificatePinner');
+        CertificatePinner.check.overload('java.lang.String', 'java.util.List').implementation = function () {
+            return;
+        };
+    } catch (e) {}
+    try {
+        var TrustManagerImpl = Java.use('com.android.org.conscrypt.TrustManagerImpl');
+        TrustManagerImpl.verifyChain.implementation = function (untrustedChain, trustAnchorChain, host) {
+            return untrustedChain;
+        };
+    } catch (e) {}
+});"""
+
+FRIDA_IOS_BYPASS = """if (ObjC.available) {
+    try {
+        var secTrustEvaluate = Module.findExportByName('Security', 'SecTrustEvaluate');
+        if (secTrustEvaluate) {
+            Interceptor.replace(secTrustEvaluate, new NativeCallback(function (trust, result) {
+                if (result) {
+                    Memory.writeU32(result, 1);
+                }
+                return 0;
+            }, 'int', ['pointer', 'pointer']));
+        }
+    } catch (e) {}
+}"""
 
 
 def tool_android_vuln(operation: str = "scan", target: str = "",
@@ -26,22 +57,26 @@ def tool_android_vuln(operation: str = "scan", target: str = "",
                      timeout=30)
 
     if operation == "intent_hijack":
-        return f"[intent_hijack] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell(f"adb shell cmd package resolve-activity --brief -a android.intent.action.VIEW 2>/dev/null; "
+                     f"adb shell dumpsys package {pkg} 2>/dev/null | grep -nE 'exported=true|intent-filter' | head -40", timeout=20)
 
     if operation == "content_provider":
-        return f"[content_provider] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell(f"adb shell dumpsys package {pkg} 2>/dev/null | grep -nE 'Provider|authorit' | head -40; "
+                     f"echo 'Try: adb shell content query --uri content://<authority>/ --user 0'", timeout=20)
 
     if operation == "deeplink":
-        return f"[deeplink] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell(f"adb shell dumpsys package {pkg} 2>/dev/null | grep -nE 'BROWSABLE|VIEW|scheme|host' | head -80; "
+                     f"echo 'Launch test: adb shell am start -a android.intent.action.VIEW -d \"app://test\" {pkg}'", timeout=20)
 
     if operation == "webview":
-        return f"[webview] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell(f"adb shell dumpsys package {pkg} 2>/dev/null | grep -nE 'WebView|javascript|setJavaScriptEnabled|addJavascriptInterface' | head -60", timeout=20)
 
     if operation == "backup":
-        return f"[backup] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell(f"adb backup -f /tmp/{pkg or 'app'}.ab {pkg} 2>/dev/null; "
+                     f"ls -lh /tmp/{pkg or 'app'}.ab 2>/dev/null || echo 'backup failed or adb not available'", timeout=30)
 
     if operation == "adb_commands":
-        return f"[adb_commands] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell(f"adb devices; adb shell pm list packages | head -30; adb shell pm path {pkg} 2>/dev/null", timeout=20)
 
     return "Operations: scan, intent_hijack, content_provider, deeplink, webview, backup, debug, adb_commands"
 
@@ -408,16 +443,19 @@ console.log("Use 'objection -g "+process.argv[0]+" explore' then: ios keychain d
                 f"   (should be kSecAttrAccessibleWhenUnlockedThisDeviceOnly)")
 
     if operation == "jailbreak_bypass":
-        return f"[jailbreak_bypass] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell("echo 'Frida iOS jailbreak bypass baseline:'; echo 'frida -U -f <bundle> -l ios_jb_bypass.js --no-pause'; "
+                     "echo 'Hook APIs: fileExistsAtPath, canOpenURL, stat, fork, getenv(DYLD_*)'", timeout=8)
 
     if operation == "nsuserdefaults":
-        return f"[nsuserdefaults] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell("echo 'NSUserDefaults extraction:'; echo 'frida-trace -U -f <bundle> -m \"*[*NSUserDefaults* *]\"'; "
+                     "echo 'objection -g <bundle> explore -s \"ios nsuserdefaults get\"'", timeout=8)
 
     if operation == "method_swizzling":
-        return f"[method_swizzling] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell("echo 'Method swizzling checklist:'; echo 'class_getInstanceMethod + method_exchangeImplementations'; "
+                     "echo 'Target auth/network gate methods first.'", timeout=8)
 
     if operation == "runtime_analysis":
-        return f"[runtime_analysis] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell("echo 'Runtime analysis baseline:'; echo 'frida-ps -Uai'; echo 'frida-trace -U -f <bundle> -i \"*login*\" -i \"*token*\"'", timeout=8)
 
     return ("iOS vuln operations:\n"
             "  scan, keychain, nsuserdefaults, url_scheme,\n"
@@ -590,10 +628,16 @@ def tool_ssl_pinning_bypass(operation: str = "frida", target: str = "",
                 f"# 3. Traffic flows through mitmproxy plaintext")
 
     if operation == "apktool_patch":
-        return f"[apktool_patch] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        pkg = package_name or "app"
+        return _shell(f"echo 'apktool patch flow for {pkg}'; "
+                     "echo '1) apktool d app.apk -o out'; "
+                     "echo '2) add network_security_config + cleartextTrafficPermitted'; "
+                     "echo '3) apktool b out -o app-patched.apk'; "
+                     "echo '4) apksigner sign --ks keystore.jks app-patched.apk'", timeout=10)
 
     if operation == "custom":
-        return f"[custom] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell("echo 'Custom pinning bypass template:'; echo 'frida -U -f <pkg> -l custom_ssl_bypass.js --no-pause'; "
+                     "echo 'Hook okhttp3.CertificatePinner.check and TrustManager.checkServerTrusted'", timeout=10)
 
     return "Operations: frida (Android/iOS universal bypass), objection, apktool_patch, ios_frida, custom"
 

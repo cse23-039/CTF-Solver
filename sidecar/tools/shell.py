@@ -2,6 +2,14 @@
 from __future__ import annotations
 import sys, json, subprocess, io, contextlib, traceback, platform as _platform, shutil
 
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 IS_WINDOWS = _platform.system() == "Windows"
 USE_WSL: bool  # set after _wsl_ok() call below
 
@@ -22,7 +30,12 @@ def _w2l(p):
     return p.replace("\\","/")
 
 
-def emit(t, **kw): kw["type"]=t; print(json.dumps(kw,ensure_ascii=False),flush=True)
+def emit(t, **kw):
+    kw["type"] = t
+    try:
+        print(json.dumps(kw, ensure_ascii=False), flush=True)
+    except UnicodeEncodeError:
+        print(json.dumps(kw, ensure_ascii=True), flush=True)
 
 
 def log(tag,msg,cls=""): emit("log",tag=tag,msg=str(msg),cls=cls)
@@ -72,7 +85,7 @@ def tool_execute_python(code, timeout=60):
         err = buf_e.getvalue()
         full = (out + ("\n[stderr]\n"+err if err.strip() else "")).strip()
         return full or "(executed — no output)"
-    except Exception as ex:
+    except BaseException as ex:
         return f"{type(ex).__name__}: {ex}\n{traceback.format_exc()}\n{buf_e.getvalue()}".strip()
 
 

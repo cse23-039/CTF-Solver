@@ -1,5 +1,21 @@
 """TOOLS list and TOOL_MAP — JSON schemas for the AI tool loop."""
 from __future__ import annotations
+import json
+import os
+from collections import defaultdict
+
+from tools.shell import *
+from tools.transform import *
+from tools.crypto_impl import *
+from tools.web_impl import *
+from tools.pwn_impl import *
+from tools.forensics_impl import *
+from tools.reverse_impl import *
+from tools.mobile_impl import *
+from tools.steg_impl import *
+from tools.sandbox_impl import *
+from tools.misc_impl import *
+from tools.apt_tool import tool_apt_orchestrator
 
 # ─── Tool registry ────────────────────────────────────────────────────────────
 TOOLS = [
@@ -146,6 +162,12 @@ TOOLS = [
      "input_schema":{"type":"object","properties":{
          "flag":{"type":"string"},"challenge_id":{"type":"string"}
      },"required":["flag"]}},
+
+    {"name":"health_preflight",
+     "description":"Environment health and capability preflight. Checks required commands/python modules by scope so the planner can avoid unavailable tools automatically.",
+     "input_schema":{"type":"object","properties":{
+         "scope":{"type":"string","enum":["core","web","pwn","mobile","forensics"]}
+     },"required":[]}},
 
     {"name":"detect_flag_format",
      "description":"""CALL THIS FIRST at the start of every solve. Auto-detects the CTF flag format using:
@@ -519,6 +541,7 @@ TOOL_MAP = {
     "write_binary":        lambda a: tool_write_binary(a["path"],a["hex_content"]),
     "download_file":       lambda a: tool_download_file(a["url"],a["dest_path"],a.get("headers"),a.get("cookies")),
     "submit_flag":         lambda a: tool_submit_flag(a["flag"],a.get("challenge_id","")),
+    "health_preflight":    lambda a: tool_health_preflight(a.get("scope","core")),
     "detect_flag_format":  lambda a: tool_detect_flag_format(a.get("ctf_name",""),a.get("description",""),a.get("platform_type",""),a.get("hint","")),
     "js_analyze":          lambda a: tool_js_analyze(a["url_or_path"],a["operation"]),
     "wasm_analyze":        lambda a: tool_wasm_analyze(a["path"],a["operation"]),
@@ -752,6 +775,56 @@ TOOL_MAP.update({
     "tool_control_flow_recovery": lambda a: _adv.tool_control_flow_recovery(**a),
     "tool_auto_exploit_loop": lambda a: _adv.tool_auto_exploit_loop(**a),
 })
+
+
+def _looks_structured_json(s: str) -> bool:
+    try:
+        obj = json.loads(s)
+        return isinstance(obj, dict) and {"status", "confidence", "output"}.issubset(obj.keys())
+    except Exception:
+        return False
+
+
+def _normalize_tool_result(tool_name: str, raw: object) -> str:
+    if isinstance(raw, str) and _looks_structured_json(raw):
+        return raw
+    if isinstance(raw, dict) and {"status", "confidence", "output"}.issubset(raw.keys()):
+        try:
+            return json.dumps(raw, ensure_ascii=False)
+        except Exception:
+            pass
+    text = str(raw)
+    low = text.lower()
+    bad = (
+        low.startswith("tool error:")
+        or low.startswith("tool timeout")
+        or low.startswith("unknown tool:")
+        or ("traceback" in low)
+        or ('"status": "error"' in low)
+    )
+    payload = {
+        "tool": tool_name,
+        "status": "error" if bad else "ok",
+        "confidence": 0.35 if bad else 0.82,
+        "artifacts": [],
+        "next_action": "Inspect output and proceed with recommended follow-up tool.",
+        "output": text,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _wrap_tool_callable(name: str, fn):
+    def _wrapped(args):
+        try:
+            raw = fn(args)
+            return _normalize_tool_result(name, raw)
+        except Exception as e:
+            return _normalize_tool_result(name, f"Tool error: {type(e).__name__}: {e}")
+    return _wrapped
+
+
+for _tool_name, _tool_fn in list(TOOL_MAP.items()):
+    TOOL_MAP[_tool_name] = _wrap_tool_callable(_tool_name, _tool_fn)
 
 # ─── CTF-scoped knowledge graph ───────────────────────────────────────────────
 _ctf_knowledge: dict = defaultdict(dict)  # ctf_name → {key: value}

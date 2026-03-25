@@ -2,6 +2,11 @@
 from __future__ import annotations
 
 
+_MODEL_OPUS = "claude-opus-4-1-20250805"
+_MODEL_SONNET = "claude-sonnet-4-6"
+_MODEL_HAIKU = "claude-haiku-4-5-20251001"
+
+
 def _kgkey(ctf_name: str) -> str:
     return re.sub(r'[^a-z0-9]', '', ctf_name.lower())
 

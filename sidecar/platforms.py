@@ -40,13 +40,17 @@ class BasePlatform:
             self.session.headers.update({"User-Agent": "CTF-Solver/1.0"})
 
     def login(self) -> str:
-        raise NotImplementedError
+        return f"No login flow implemented for platform type '{self.name}'."
 
     def get_challenges(self) -> list:
-        raise NotImplementedError
+        return []
 
     def submit_flag(self, challenge_id, flag: str) -> dict:
-        raise NotImplementedError
+        return {
+            "correct": False,
+            "message": f"submit_flag not implemented for platform type '{self.name}'",
+            "challenge_id": challenge_id,
+        }
 
     def download_file(self, url: str, dest_path: str) -> str:
         """Download a file to dest_path. Returns the local path."""

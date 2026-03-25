@@ -1,6 +1,26 @@
 """Model selection and routing."""
 from __future__ import annotations
 
+import json
+import math
+
+from core import budget as core_budget
+from core import routing as core_routing
+from core.parsing import TokenizationCache
+
+
+_MODEL_OPUS = "claude-opus-4-1-20250805"
+_MODEL_SONNET = "claude-sonnet-4-6"
+_MODEL_HAIKU = "claude-haiku-4-5-20251001"
+
+_MODEL_PRICING_USD_PER_MTOK = {
+    _MODEL_OPUS: {"input": 15.0, "output": 75.0},
+    _MODEL_SONNET: {"input": 3.0, "output": 15.0},
+    _MODEL_HAIKU: {"input": 0.8, "output": 4.0},
+}
+
+_TOKEN_CACHE = TokenizationCache(max_size=384)
+
 
 def _extract_text_for_token_estimation(value, max_chars: int = 24_000, depth: int = 0) -> str:
     if value is None or max_chars <= 0 or depth > 8:

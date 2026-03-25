@@ -1,6 +1,7 @@
 """Binary exploitation and pwn tools."""
 from __future__ import annotations
 import re, subprocess, struct, os, shutil
+from tools.shell import _shell, _w2l, IS_WINDOWS, USE_WSL, tool_execute_python
 
 
 def tool_binary_analysis(path, operation, args=None):
@@ -1030,7 +1031,14 @@ else:
         return tool_execute_python(code, timeout=15)
 
     if operation == "type_confusion":
-        return f"[type_confusion] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return tool_execute_python(f"""
+print('Type confusion executable workflow')
+print('1) Find unsafe cast sites in decompiler output (static_cast/reinterpret_cast/C-style cast).')
+print('2) Confirm virtual call target is attacker-controlled object pointer.')
+print('3) Re-layout fake object with forged vptr at offset 0x0.')
+print('4) Redirect vptr to fake vtable with controlled RIP target.')
+print('Binary:', {binary_path!r})
+""", timeout=12)
 
     if operation == "vtable_overwrite":
         target = rip_target or "system@plt"
@@ -1349,10 +1357,27 @@ print("  vtable = &_IO_str_jumps  (bypasses vtable check)")
                 "\n".join(f"  {k}: {hex(v)}" for k,v in IO_FILE_OFFSETS.items()))
 
     if operation == "wide_data":
-        return f"[wide_data] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return tool_execute_python(f"""
+from pwn import *
+print('FSOP wide_data executable scaffold (glibc>=2.35)')
+print('binary:', {binary_path!r})
+print('libc:', {libc_path!r})
+print('Plan: build fake FILE + fake _wide_data + fake vtable on heap, then trigger _IO_flush_all_lockp')
+print('Core offsets to fill: _wide_data@0xa0, vtable@0xd8, _mode@0xc0')
+print('Trigger paths: abort()/exit()/fflush(NULL) depending on challenge control flow')
+print('Next: run heap_analysis + libc_lookup, then use operation=skeleton for full exploit template')
+""", timeout=15)
 
     if operation == "_io_list_all":
-        return f"[_io_list_all] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return tool_execute_python(f"""
+from pwn import *
+print('_IO_list_all takeover executable checklist')
+print('1) Leak libc base')
+print('2) Compute _IO_list_all and _IO_wfile_jumps')
+print('3) AAW primitive writes _IO_list_all -> fake_file_addr')
+print('4) Trigger flush path (exit/abort)')
+print('Validation command: readelf -s {binary_path!r} | grep -E "_IO_list_all|_IO_wfile_jumps"')
+""", timeout=15)
 
     if operation == "skeleton":
         return (f"Full FSOP exploit skeleton (glibc 2.35+):\n\n"
@@ -1808,19 +1833,35 @@ print("  CVE-2022-2588: route4_change UAF → LPE")
         return tool_execute_python(code, timeout=15)
 
     if operation == "dirty_pipe":
-        return f"[dirty_pipe] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell("uname -a; grep -R \"Dirty Pipe\\|CVE-2022-0847\" /usr/share/doc 2>/dev/null | head -10; "
+                     "echo 'If kernel vulnerable, compile PoC and target writable file with page-cache overwrite.'", timeout=12)
 
     if operation == "modprobe_path":
-        return f"[modprobe_path] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return "\n".join([
+            "modprobe_path executable plan:",
+            "1) Gain arbitrary kernel write primitive.",
+            "2) Overwrite modprobe_path with /tmp/x.",
+            "3) Write /tmp/x script: chmod u+s /bin/sh.",
+            "4) Trigger request_module via unknown-bin execution.",
+            "5) Execute /bin/sh -p for root shell.",
+        ])
 
     if operation == "userfaultfd_uaf":
-        return f"[userfaultfd_uaf] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell("sysctl vm.unprivileged_userfaultfd 2>/dev/null; "
+                     "echo 'If enabled, use userfaultfd stall to widen race window around UAF/free path.'", timeout=10)
 
     if operation == "ret2usr":
-        return f"[ret2usr] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return _shell("grep -E 'smep|smap|pti|kaslr' /proc/cpuinfo 2>/dev/null | head -5; "
+                     "echo 'ret2usr requires SMEP/SMAP bypass or CR4 control before jumping to userland payload.'", timeout=10)
 
     if operation == "slub_overflow":
-        return f"[slub_overflow] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return "\n".join([
+            "SLUB overflow executable workflow:",
+            "- Identify kmalloc cache of victim object (slabinfo / dmesg hints).",
+            "- Groom with controlled allocations/frees in same cache.",
+            "- Overflow adjacent object field/function pointer.",
+            "- Pivot to cred overwrite or modprobe_path chain.",
+        ])
 
     return ("Kernel LPE operations:\n"
             "  detect        — kernel version, mitigations, applicable CVEs\n"
@@ -2048,7 +2089,13 @@ if jmps > 10:
         return "\n".join(lines)
 
     if operation == "devirt_skeleton":
-        return f"[devirt_skeleton] Claude handles this directly — use execute_python/execute_shell to run the technique"
+        return "\n".join([
+            "VM devirtualization skeleton:",
+            "- Trace dispatcher loop and log (pc, opcode, regs) each step.",
+            "- Build opcode_map from observed handlers.",
+            "- Lift bytecode to pseudo-IR and replay with custom_cpu_emulate.",
+            "- Validate by matching output on known test vectors.",
+        ])
 
     return "Operations: detect, trace, lift, devirt_skeleton"
 
