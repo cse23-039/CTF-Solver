@@ -58,9 +58,11 @@ SUDO=""
 ARCH=$(uname -m)     # x86_64 | aarch64
 ok "Architecture: $ARCH"
 
-# ── Ubuntu version ───────────────────────────────────────────────────────────
-UBUNTU_VER=$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-unknown}" || echo "unknown")
-ok "Ubuntu: $UBUNTU_VER"
+# ── Distro/version ───────────────────────────────────────────────────────────
+DISTRO_ID=$(. /etc/os-release 2>/dev/null && echo "${ID:-unknown}" || echo "unknown")
+DISTRO_LIKE=$(. /etc/os-release 2>/dev/null && echo "${ID_LIKE:-}" || echo "")
+DISTRO_VER=$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-unknown}" || echo "unknown")
+ok "Distro: ${DISTRO_ID} ${DISTRO_VER}"
 
 # ── Network connectivity ──────────────────────────────────────────────────────
 if ! curl -s --max-time 10 https://archive.ubuntu.com > /dev/null 2>&1; then
@@ -107,7 +109,23 @@ apt_get() {
         $SUDO apt-get install -y --no-install-recommends "$pkg" \
             >/dev/null 2>&1 || failed+=("$pkg")
     done
-    [[ ${#failed[@]} -gt 0 ]] && warn "apt: failed to install: ${failed[*]}"
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        warn "apt: failed to install: ${failed[*]}"
+    fi
+    return 0
+}
+
+apt_get_first() {
+    local label=$1; shift
+    local pkg
+    for pkg in "$@"; do
+        if $SUDO apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1; then
+            ok "$label: $pkg"
+            return 0
+        fi
+    done
+    warn "apt: failed to install any candidate for $label (${*})"
+    return 0
 }
 
 pip_get() {
@@ -116,7 +134,7 @@ pip_get() {
             >/dev/null 2>&1 \
             || python3 -m pip install --quiet -r "$2" >/dev/null 2>&1 \
             || warn "pip: failed: -r $2"
-        return
+        return 0
     fi
     local failed=()
     for pkg in "$@"; do
@@ -125,7 +143,10 @@ pip_get() {
             || python3 -m pip install --quiet "$pkg" >/dev/null 2>&1 \
             || failed+=("$pkg")
     done
-    [[ ${#failed[@]} -gt 0 ]] && warn "pip: failed to install: ${failed[*]}"
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        warn "pip: failed to install: ${failed[*]}"
+    fi
+    return 0
 }
 
 gem_get()   { gem install --quiet "$@" 2>/dev/null || warn "gem: failed: $*"; }
@@ -153,10 +174,22 @@ gh_latest() {
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "System update"
 $SUDO apt-get update -qq
+
+# Debian/Kali often require explicit i386 multiarch before installing *:i386 packages.
+if [[ "$DISTRO_ID" == "kali" || "$DISTRO_ID" == "debian" || "$DISTRO_LIKE" == *"debian"* ]]; then
+    $SUDO dpkg --add-architecture i386 >/dev/null 2>&1 || true
+fi
+
 $SUDO apt-get install -y --no-install-recommends \
-    software-properties-common ca-certificates gnupg lsb-release \
+    ca-certificates gnupg lsb-release \
     >/dev/null 2>&1 || true
-$SUDO add-apt-repository -y universe >/dev/null 2>&1 || true
+
+# Ubuntu-only repository helper.
+if [[ "$DISTRO_ID" == "ubuntu" ]]; then
+    $SUDO apt-get install -y --no-install-recommends software-properties-common >/dev/null 2>&1 || true
+    $SUDO add-apt-repository -y universe >/dev/null 2>&1 || true
+fi
+
 $SUDO apt-get update -qq
 ok "apt repos updated"
 
@@ -178,7 +211,7 @@ apt_get \
     crossbuild-essential-arm64 \
     tmux socat netcat-openbsd ncat \
     fzf ripgrep \
-    file xxd strings \
+    file xxd \
     gdb gdb-multiarch \
     ltrace strace \
     adb \
@@ -198,9 +231,14 @@ apt_get \
     libmagic-dev \
     elfutils \
     libc6-dbg \
-    libc6-dbg:i386 \
     qemu-user-static \
     binfmt-support
+
+if [[ "$DISTRO_ID" != "kali" ]]; then
+    apt_get libc6-dbg:i386
+else
+    warn "Skipping libc6-dbg:i386 on Kali (known apt/dpkg breakage risk)"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. NETWORK & PCAP
@@ -251,8 +289,9 @@ apt_get \
     ffmpeg \
     sox \
     multimon-ng \
-    wavbreaker \
-    libwav-dev
+    wavbreaker
+
+apt_get_first "wav dev headers" libwav-dev libsndfile1-dev
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. CRYPTO & CRACKING
@@ -272,7 +311,6 @@ apt_get \
 # ─────────────────────────────────────────────────────────────────────────────
 hdr "Compression & archive tools"
 apt_get \
-    p7zip-full \
     unar \
     zip unzip \
     bzip2 xz-utils zstd lz4 \
@@ -281,6 +319,8 @@ apt_get \
     lhasa \
     cpio \
     rpm2cpio
+
+apt_get_first "7z" p7zip-full 7zip p7zip
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 9. MISC SYSTEM TOOLS
@@ -293,7 +333,6 @@ apt_get \
     jq yq \
     bc \
     parallel \
-    wamerican \
     seclists
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -313,8 +352,7 @@ pip_get \
     xortool \
     "name-that-hash" \
     hashid \
-    pyOpenSSL \
-    sagemath
+    pyOpenSSL
 
 # Binary exploitation
 pip_get \
@@ -508,6 +546,13 @@ if ! command -v checksec &>/dev/null; then
     && ok "checksec" || warn "checksec: failed"
 else ok "checksec already installed"; fi
 
+# ── rappel ────────────────────────────────────────────────────────────────────
+if ! command -v rappel &>/dev/null; then
+    log "rappel..."
+    apt_get rappel \
+    && ok "rappel" || warn "rappel: failed (package may be unavailable on this distro)"
+else ok "rappel already installed"; fi
+
 # ── jadx ─────────────────────────────────────────────────────────────────────
 if ! command -v jadx &>/dev/null; then
     log "jadx..."
@@ -589,34 +634,62 @@ else ok "apktool already installed"; fi
 # ── Ghidra ────────────────────────────────────────────────────────────────────
 if [[ $SKIP_HEAVY -eq 0 ]]; then
     if ! command -v ghidra &>/dev/null && [[ ! -d /opt/ghidra ]]; then
-        log "Ghidra (large download ~600 MB)..."
-        GHIDRA_VER=$(gh_latest NationalSecurityAgency/ghidra || echo "11.1.2")
-        GHIDRA_DATE=$(curl -s "https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/latest" \
-            | grep '"tag_name"' | grep -oP '\d{8}' || echo "20240709")
-        GHIDRA_ZIP="ghidra_${GHIDRA_VER}_PUBLIC_${GHIDRA_DATE}.zip"
-        if fetch "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VER}_build/${GHIDRA_ZIP}" /tmp/ghidra.zip \
-        && $SUDO unzip -q /tmp/ghidra.zip -d /opt \
-        && $SUDO mv "/opt/ghidra_${GHIDRA_VER}_PUBLIC" /opt/ghidra; then
-            $SUDO tee /usr/local/bin/ghidra >/dev/null <<'EOF'
+        # Kali repos usually provide ghidra directly (cleaner than manual zip install).
+        if [[ "$DISTRO_ID" == "kali" ]]; then
+            log "Ghidra (apt, Kali)..."
+            if apt_get ghidra && command -v ghidra &>/dev/null; then
+                ok "Ghidra (apt)"
+            else
+                warn "Ghidra (apt): failed on Kali, falling back to upstream download"
+            fi
+        fi
+
+        if ! command -v ghidra &>/dev/null && [[ ! -d /opt/ghidra ]]; then
+            log "Ghidra (large download ~600 MB)..."
+            GHIDRA_VER=$(gh_latest NationalSecurityAgency/ghidra || echo "11.1.2")
+            GHIDRA_DATE=$(curl -s "https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/latest" \
+                | grep '"tag_name"' | grep -oP '\d{8}' || echo "20240709")
+            GHIDRA_ZIP="ghidra_${GHIDRA_VER}_PUBLIC_${GHIDRA_DATE}.zip"
+            if fetch "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VER}_build/${GHIDRA_ZIP}" /tmp/ghidra.zip \
+            && $SUDO unzip -q /tmp/ghidra.zip -d /opt \
+            && $SUDO mv "/opt/ghidra_${GHIDRA_VER}_PUBLIC" /opt/ghidra; then
+                $SUDO tee /usr/local/bin/ghidra >/dev/null <<'EOF'
 #!/bin/sh
 exec /opt/ghidra/ghidraRun "$@"
 EOF
-            $SUDO chmod +x /usr/local/bin/ghidra
-            # Headless analyzeHeadless wrapper
-            $SUDO tee /usr/local/bin/ghidra-headless >/dev/null <<'EOF'
+                $SUDO chmod +x /usr/local/bin/ghidra
+                # Headless analyzeHeadless wrapper
+                $SUDO tee /usr/local/bin/ghidra-headless >/dev/null <<'EOF'
 #!/bin/sh
 exec /opt/ghidra/support/analyzeHeadless "$@"
 EOF
-            $SUDO chmod +x /usr/local/bin/ghidra-headless
-            ok "Ghidra v${GHIDRA_VER}"
-        else
-            warn "Ghidra: failed — install manually from https://ghidra-sre.org/"
+                $SUDO chmod +x /usr/local/bin/ghidra-headless
+                ok "Ghidra v${GHIDRA_VER}"
+            else
+                warn "Ghidra: failed — install manually from https://ghidra-sre.org/"
+            fi
+            rm -f /tmp/ghidra.zip
         fi
-        rm -f /tmp/ghidra.zip
+
+        if command -v ghidra &>/dev/null || [[ -d /opt/ghidra ]]; then
+            ok "Ghidra already installed"
+        fi
     else ok "Ghidra already installed"; fi
 
+    # Ensure headless wrapper exists when ghidra is installed by apt packages.
+    if command -v ghidra &>/dev/null && ! command -v ghidra-headless &>/dev/null; then
+        if [[ -x /usr/share/ghidra/support/analyzeHeadless ]]; then
+            $SUDO tee /usr/local/bin/ghidra-headless >/dev/null <<'EOF'
+#!/bin/sh
+exec /usr/share/ghidra/support/analyzeHeadless "$@"
+EOF
+            $SUDO chmod +x /usr/local/bin/ghidra-headless
+            ok "ghidra-headless wrapper"
+        fi
+    fi
+
     # pyhidra — Python bindings for Ghidra headless
-    if [[ -d /opt/ghidra ]]; then
+    if [[ -d /opt/ghidra || -d /usr/share/ghidra || -x /usr/share/ghidra/support/analyzeHeadless ]]; then
         pip_get pyhidra && ok "pyhidra" || warn "pyhidra: failed (install Ghidra first)"
     fi
 else warn "Skipping Ghidra (--skip-heavy)"; fi
@@ -811,11 +884,22 @@ else ok "CyberChef already at /opt/cyberchef"; fi
 # ── Wordlists (rockyou) ───────────────────────────────────────────────────────
 if [[ ! -f /usr/share/wordlists/rockyou.txt ]]; then
     log "rockyou.txt wordlist..."
-    apt_get wordlists 2>/dev/null \
-    && [[ -f /usr/share/wordlists/rockyou.txt.gz ]] \
-    && $SUDO gunzip /usr/share/wordlists/rockyou.txt.gz \
-    && ok "rockyou.txt" \
-    || warn "rockyou.txt: apt install failed — download from danielmiessler/SecLists"
+    if [[ -f /usr/share/wordlists/rockyou.txt.gz ]]; then
+        $SUDO gunzip -f /usr/share/wordlists/rockyou.txt.gz \
+        && ok "rockyou.txt (decompressed)" \
+        || warn "rockyou.txt: failed to decompress existing .gz"
+    else
+        apt_get wordlists 2>/dev/null
+        if [[ -f /usr/share/wordlists/rockyou.txt ]]; then
+            ok "rockyou.txt"
+        elif [[ -f /usr/share/wordlists/rockyou.txt.gz ]]; then
+            $SUDO gunzip -f /usr/share/wordlists/rockyou.txt.gz \
+            && ok "rockyou.txt" \
+            || warn "rockyou.txt: apt installed, but decompression failed"
+        else
+            warn "rockyou.txt: not found after package install — download from danielmiessler/SecLists"
+        fi
+    fi
 else ok "rockyou.txt already present"; fi
 
 # ─────────────────────────────────────────────────────────────────────────────
