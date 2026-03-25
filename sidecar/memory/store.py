@@ -48,6 +48,14 @@ def load_memory_v2(limit: int = 800) -> list[dict]:
 def store_memory_v2(record: dict) -> None:
     path = memory_v2_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    if "memory_type" not in record:
+        rtype = str(record.get("type", "")).lower()
+        if rtype == "failure_map":
+            record["memory_type"] = "anti_pattern"
+        elif record.get("winning_path"):
+            record["memory_type"] = "episodic"
+        else:
+            record["memory_type"] = "semantic"
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -108,12 +116,21 @@ def analyze_memory_consistency(memory_hits: list[dict]) -> dict:
         contradictions.append("multiple_flag_prefixes")
 
     top_tools = set()
+    first_tools = set()
     for rec in memory_hits[:4]:
         seq = rec.get("tool_sequence")
         if isinstance(seq, list) and seq:
             top_tools.add(str(seq[0]))
+            first_tools.add(str(seq[0]).strip().lower())
     if len(top_tools) >= 3 and len(memory_hits) <= 4:
         contradictions.append("divergent_opening_toolchains")
+    if len(first_tools) >= 3 and len(memory_hits) >= 3:
+        contradictions.append("conflicting_first_tool_signal")
+
+    episodic = [h for h in memory_hits if str(h.get("memory_type", "")).lower() == "episodic"]
+    anti_pattern = [h for h in memory_hits if str(h.get("memory_type", "")).lower() == "anti_pattern"]
+    if anti_pattern and episodic and len(anti_pattern) >= len(episodic):
+        contradictions.append("anti_pattern_dominance")
 
     summary = (
         f"memory_hits={len(memory_hits)} trusted={len(trusted_hits)} avg_trust={average_trust:.2f} "
@@ -167,7 +184,9 @@ def retrieve_memory_v2(challenge: dict, ctf_name: str = "", top_k: int = 3) -> l
         ctf_bonus = 3 if ctf_name and rec.get("ctf_name", "").strip().lower() == ctf_name.strip().lower() else 0
         similarity = overlap / max(1, len(qtok))
         trust = memory_trust_score(rec, ctf_name=ctf_name, category=category, query_fingerprint=query_fp)
-        score = (overlap + ctf_bonus) + (trust * 6.0)
+        mtype = str(rec.get("memory_type", "semantic")).lower()
+        type_mult = {"episodic": 1.18, "semantic": 1.0, "anti_pattern": 0.88}.get(mtype, 1.0)
+        score = ((overlap + ctf_bonus) + (trust * 6.0)) * type_mult
         rec2 = dict(rec)
         rec2["_memory_similarity"] = round(similarity, 4)
         rec2["_memory_trust"] = round(trust, 4)
@@ -221,6 +240,8 @@ def store_failure_path(
         "category": category,
         "difficulty": difficulty,
         "failed_approaches": failed_approaches[:20],
+        "source_strength": 0.55,
+        "reproducibility_count": 1,
         "timestamp": int(time.time()),
     }
     store_memory_v2(record)
@@ -230,15 +251,40 @@ def retrieve_failure_paths(challenge: dict, ctf_name: str = "", top_k: int = 3) 
     fp = challenge_fingerprint(challenge, ctf_name)
     cat = str(challenge.get("category", "")).lower()
     rows = load_memory_v2(limit=400)
-    matches = []
+    scored_matches = []
     for row in rows:
         if row.get("type") != "failure_map":
             continue
-        if row.get("fingerprint") == fp or str(row.get("category", "")).lower() == cat:
-            matches.append(row)
-    matches.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        row_cat = str(row.get("category", "")).lower()
+        row_ctf = str(row.get("ctf_name", "")).strip().lower()
+        row_fp = str(row.get("fingerprint", ""))
+
+        # Candidate scope: exact fingerprint OR same CTF/category neighborhood.
+        if not (row_fp == fp or (ctf_name and row_ctf == ctf_name.strip().lower()) or row_cat == cat):
+            continue
+
+        score = 0.0
+        if row_fp == fp:
+            score += 0.65
+        if ctf_name and row_ctf == ctf_name.strip().lower():
+            score += 0.20
+        if row_cat == cat:
+            score += 0.15
+        score += max(0.0, min(0.20, float(row.get("source_strength", 0.5) or 0.5) * 0.20))
+        score += max(0.0, min(0.10, float(row.get("reproducibility_count", 0.0) or 0.0) * 0.05))
+
+        ts = int(row.get("timestamp", 0) or 0)
+        if ts > 0:
+            age_days = max(0.0, (time.time() - ts) / 86400.0)
+            # Faster decay for failures; stale dead-ends should not dominate.
+            score *= max(0.4, 1.0 - (age_days / 90.0))
+
+        if score >= 0.35:
+            scored_matches.append((score, row))
+
+    scored_matches.sort(key=lambda x: x[0], reverse=True)
 
     dead_ends = []
-    for rec in matches[:max(1, int(top_k))]:
+    for _, rec in scored_matches[:max(1, int(top_k))]:
         dead_ends.extend(rec.get("failed_approaches", []))
     return list(dict.fromkeys([str(d) for d in dead_ends if str(d).strip()]))

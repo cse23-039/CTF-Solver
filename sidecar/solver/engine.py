@@ -59,8 +59,14 @@ def _query_live_challenge_status(platform_config: dict, challenge_id: str) -> di
     if not platform_config or platform_config.get("type") == "manual" or not challenge_id:
         return {"enabled": False, "found": False, "solved": False, "solve_count": 0}
     try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from platforms import get_challenge_status
+        try:
+            from platforms import get_challenge_status
+        except Exception:
+            import importlib
+            sidecar_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if sidecar_root not in sys.path:
+                sys.path.insert(0, sidecar_root)
+            get_challenge_status = importlib.import_module("platforms").get_challenge_status
 
         data = get_challenge_status(platform_config, str(challenge_id))
         if isinstance(data, dict):
@@ -992,92 +998,116 @@ def run_import(payload):
     solve_extra = payload.get("extraConfig", {}) if isinstance(payload.get("extraConfig", {}), dict) else {}
     single_active_lock = bool(payload.get("singleActiveSolveLock", True))
     lock_ttl_s = max(60, int(payload.get("singleActiveSolveLockTtlSeconds", 6 * 3600) or 6 * 3600))
-
-    def _active_solve_lock_path() -> str:
-        root = os.path.join(base_dir, re.sub(r'[<>:"/\\|?*]', "_", str(ctf_name)).strip()[:80], ".solver")
-        os.makedirs(root, exist_ok=True)
-        return os.path.join(root, "active_solve.lock")
+    queue_maxsize = max(1, int(payload.get("autoSolveQueueSize", 16) or 16))
+    queue_heartbeat_seconds = max(3.0, float(payload.get("autoSolveQueueHeartbeatSeconds", 15.0) or 15.0))
+    from solver.import_scheduler import (
+        try_acquire_active_solve_lock as _try_acquire_active_solve_lock_raw,
+        release_active_solve_lock as _release_active_solve_lock_raw,
+        build_queue as _build_queue_raw,
+        persist_queue as _persist_queue_raw,
+    )
+    from solver.solve_executor import execute_solve_payload as _execute_solve_payload
+    from solver.auto_solve_queue import AutoSolveQueue as _AutoSolveQueue
 
     def _try_acquire_active_solve_lock() -> tuple[bool, str]:
-        lock_path = _active_solve_lock_path()
-        if not single_active_lock:
-            return True, lock_path
-        now = int(time.time())
-
-        # Clear stale lock if needed.
-        if os.path.exists(lock_path):
-            try:
-                age = now - int(os.path.getmtime(lock_path))
-                if age >= lock_ttl_s:
-                    os.remove(lock_path)
-                    emit("solve_lock", action="stale_lock_cleared", path=lock_path, age_s=age)
-            except Exception:
-                pass
-
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"pid": os.getpid(), "ts": now}, ensure_ascii=False))
-            emit("solve_lock", action="acquired", path=lock_path)
-            return True, lock_path
-        except FileExistsError:
-            emit("solve_lock", action="busy", path=lock_path)
-            return False, lock_path
-        except Exception as e:
-            emit("solve_lock", action="error", path=lock_path, error=str(e))
-            return False, lock_path
+        return _try_acquire_active_solve_lock_raw(
+            base_dir=base_dir,
+            ctf_name=ctf_name,
+            ttl_s=lock_ttl_s,
+            enabled=single_active_lock,
+            emit_cb=emit,
+        )
 
     def _release_active_solve_lock(lock_path: str) -> None:
-        if not single_active_lock:
-            return
-        try:
-            if lock_path and os.path.exists(lock_path):
-                os.remove(lock_path)
-                emit("solve_lock", action="released", path=lock_path)
-        except Exception:
-            pass
-
-    def _priority_score(ch: dict) -> float:
-        ev = 0.0
-        try:
-            ev = float(_compute_expected_value_score(ch))
-        except Exception:
-            ev = 0.0
-        solved_penalty = -5.0 if bool(ch.get("solved", False)) else 0.0
-        new_bonus = 0.35 if bool(ch.get("is_new", False)) else 0.0
-        upd_bonus = 0.15 if bool(ch.get("is_updated", False)) else 0.0
-        cat = str(ch.get("category", "")).lower()
-        cat_bonus = 0.10 if any(x in cat for x in ("crypto", "reverse", "web", "forensic", "pwn", "binary")) else 0.0
-        return round(ev + solved_penalty + new_bonus + upd_bonus + cat_bonus, 4)
+        _release_active_solve_lock_raw(lock_path, enabled=single_active_lock, emit_cb=emit)
 
     def _build_queue(rows: list[dict]) -> list[dict]:
-        q = []
-        for row in rows:
-            if bool(row.get("solved", False)):
-                continue
-            rec = dict(row)
-            rec["queue_expected_value"] = _priority_score(row)
-            q.append(rec)
-        q.sort(key=lambda x: float(x.get("queue_expected_value", 0.0)), reverse=True)
-        for idx, item in enumerate(q, 1):
-            item["queue_rank"] = idx
-        return q
+        return _build_queue_raw(rows, expected_value_fn=_compute_expected_value_score)
 
     def _persist_queue(queue_rows: list[dict], cycle_no: int) -> str:
-        root = os.path.join(base_dir, re.sub(r'[<>:"/\\|?*]', "_", str(ctf_name)).strip()[:80])
-        out_dir = os.path.join(root, ".solver")
-        os.makedirs(out_dir, exist_ok=True)
-        path = os.path.join(out_dir, "auto_queue.json")
-        payload_out = {
+        return _persist_queue_raw(base_dir=base_dir, ctf_name=ctf_name, queue_rows=queue_rows, cycle_no=cycle_no)
+
+    queue_persist_dir = os.path.join(base_dir, re.sub(r'[<>:"/\\|?*]', "_", str(ctf_name)).strip()[:80], ".solver")
+
+    def _run_queued_job(job: dict) -> None:
+        lock_path = str(job.get("lock_path", "") or "")
+        challenge_name = str(job.get("challenge_name", "") or "")
+        rank = int(job.get("rank", 0) or 0)
+        cycle_no = int(job.get("cycle", 0) or 0)
+        try:
+            _execute_solve_payload(_run_solve_impl, job.get("payload", {}))
+        finally:
+            _release_active_solve_lock(lock_path)
+            emit(
+                "auto_solve_finished",
+                ctf_name=ctf_name,
+                challenge=challenge_name,
+                rank=rank,
+                cycle=cycle_no,
+            )
+
+    auto_queue_worker = _AutoSolveQueue(
+        maxsize=queue_maxsize,
+        emit_cb=emit,
+        run_cb=_run_queued_job,
+        heartbeat_seconds=queue_heartbeat_seconds,
+        persist_dir=queue_persist_dir,
+        max_retries=max(0, int(payload.get("autoSolveMaxRetries", 2) or 2)),
+    )
+    auto_queue_worker.start()
+
+    def _launch_auto_solve(item: dict, cycle_no: int = 0) -> bool:
+        lock_ok, lock_path = _try_acquire_active_solve_lock()
+        if not lock_ok:
+            emit(
+                "auto_solve_skipped",
+                ctf_name=ctf_name,
+                challenge=item.get("name", ""),
+                reason="active_solve_in_progress",
+                lock_path=lock_path,
+                cycle=cycle_no,
+            )
+            return False
+
+        solve_payload = {
+            "challenge": item,
+            "api_key": solve_api_key,
+            "model": solve_model,
+            "platform": pc,
+            "base_dir": base_dir,
             "ctf_name": ctf_name,
-            "cycle": cycle_no,
-            "generated_at": int(time.time()),
-            "count": len(queue_rows),
-            "queue": queue_rows,
+            "extraConfig": {**solve_extra, "adaptiveAllocator": True, "queueExpectedValue": float(item.get("queue_expected_value", 0.0))},
         }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload_out, f, ensure_ascii=False, indent=2)
-        return path
+
+        enqueued = auto_queue_worker.enqueue(
+            {
+                "challenge_name": item.get("name", ""),
+                "payload": solve_payload,
+                "lock_path": lock_path,
+                "rank": item.get("queue_rank", 0),
+                "cycle": cycle_no,
+                "lease_id": f"{ctf_name}:{item.get('platform_id', item.get('id', item.get('name', 'unknown')))}:{cycle_no}",
+            }
+        )
+        if not enqueued:
+            _release_active_solve_lock(lock_path)
+            emit(
+                "auto_solve_skipped",
+                ctf_name=ctf_name,
+                challenge=item.get("name", ""),
+                reason="queue_full",
+                cycle=cycle_no,
+            )
+            return False
+
+        emit(
+            "auto_solve_enqueued",
+            ctf_name=ctf_name,
+            challenge=item.get("name", ""),
+            rank=item.get("queue_rank", 0),
+            cycle=cycle_no,
+        )
+        return True
 
     if not base_dir:
         log("err","No base directory set","red"); emit("import_result",error="No base directory"); return
@@ -1107,31 +1137,10 @@ def run_import(payload):
             if auto_start and solve_api_key and queue_rows:
                 starts = 0
                 for item in queue_rows[:max_auto_starts]:
-                    lock_ok, lock_path = _try_acquire_active_solve_lock()
-                    if not lock_ok:
-                        emit(
-                            "auto_solve_skipped",
-                            ctf_name=ctf_name,
-                            challenge=item.get("name", ""),
-                            reason="active_solve_in_progress",
-                            lock_path=lock_path,
-                        )
+                    if not _launch_auto_solve(item, cycle_no=1):
                         break
                     starts += 1
                     emit("auto_solve_start", ctf_name=ctf_name, challenge=item.get("name", ""), rank=item.get("queue_rank", 0), expected_value=item.get("queue_expected_value", 0.0))
-                    solve_payload = {
-                        "challenge": item,
-                        "api_key": solve_api_key,
-                        "model": solve_model,
-                        "platform": pc,
-                        "base_dir": base_dir,
-                        "ctf_name": ctf_name,
-                        "extraConfig": {**solve_extra, "adaptiveAllocator": True, "queueExpectedValue": float(item.get("queue_expected_value", 0.0))},
-                    }
-                    try:
-                        _run_solve_impl(solve_payload)
-                    finally:
-                        _release_active_solve_lock(lock_path)
                 emit("auto_solve_batch", ctf_name=ctf_name, started=starts, requested=max_auto_starts)
             return
 
@@ -1173,32 +1182,10 @@ def run_import(payload):
                 if auto_start and solve_api_key and queue_rows:
                     starts = 0
                     for item in queue_rows[:max_auto_starts]:
-                        lock_ok, lock_path = _try_acquire_active_solve_lock()
-                        if not lock_ok:
-                            emit(
-                                "auto_solve_skipped",
-                                ctf_name=ctf_name,
-                                challenge=item.get("name", ""),
-                                reason="active_solve_in_progress",
-                                lock_path=lock_path,
-                                cycle=cycle,
-                            )
+                        if not _launch_auto_solve(item, cycle_no=cycle):
                             break
                         starts += 1
                         emit("auto_solve_start", ctf_name=ctf_name, challenge=item.get("name", ""), rank=item.get("queue_rank", 0), expected_value=item.get("queue_expected_value", 0.0), cycle=cycle)
-                        solve_payload = {
-                            "challenge": item,
-                            "api_key": solve_api_key,
-                            "model": solve_model,
-                            "platform": pc,
-                            "base_dir": base_dir,
-                            "ctf_name": ctf_name,
-                            "extraConfig": {**solve_extra, "adaptiveAllocator": True, "queueExpectedValue": float(item.get("queue_expected_value", 0.0))},
-                        }
-                        try:
-                            _run_solve_impl(solve_payload)
-                        finally:
-                            _release_active_solve_lock(lock_path)
                     emit("auto_solve_batch", ctf_name=ctf_name, cycle=cycle, started=starts, requested=max_auto_starts)
 
             if watch_cycles > 0 and cycle >= watch_cycles:
@@ -1208,6 +1195,11 @@ def run_import(payload):
         emit("import_result", status="watch_completed", cycles=cycle, ctf_name=ctf_name)
     except Exception as e:
         log("err",f"Import failed: {e}","red"); emit("import_result",error=str(e))
+    finally:
+        try:
+            auto_queue_worker.stop()
+        except Exception:
+            pass
 
 
 def _run_solve_impl(payload):
@@ -1282,6 +1274,20 @@ def _run_solve_impl(payload):
             max_iterations = int(max_iterations * 1.15)
         elif ev < 0.6:
             max_iterations = max(8, int(max_iterations * 0.75))
+        try:
+            from solver.branch_budgeting import allocate_mpc_budget as _allocate_mpc_budget
+            mpc = _allocate_mpc_budget(
+                base_iterations=max_iterations,
+                expected_value=float(ev),
+                difficulty=diff,
+                reliability_pressure=float(extra.get("reliabilityPressure", 0.2) or 0.2),
+            )
+            max_iterations = int(mpc.get("total", max_iterations))
+            extra["verificationReserveIterations"] = int(mpc.get("verify", 2))
+            extra["exploreIterations"] = int(mpc.get("explore", max_iterations))
+            emit("mpc_budget", **mpc)
+        except Exception:
+            pass
     credit_guard = _init_credit_guard(extra, challenge, max_iterations)
     if credit_guard.get("enabled", False) and credit_guard.get("conservative", False):
         max_iterations = min(max_iterations, int(credit_guard.get("conservative_cap_iters", max_iterations)))
@@ -1510,6 +1516,42 @@ def _run_solve_impl(payload):
         except Exception as e:
             emit("replay_audit", error=str(e))
             print(json.dumps({"type": "replay_audit", "error": str(e)}, ensure_ascii=False), flush=True)
+        result("failed", workspace=ws)
+        return
+
+    if bool(extra.get("regressionAuditMode", False)):
+        try:
+            from solver.regression_audit import run_regression_audit as _run_regression_audit
+            audit_workspace = ws or base_dir or os.getcwd()
+            audit = _run_regression_audit(
+                workspace=audit_workspace,
+                min_solve_rate=float(extra.get("regressionMinSolveRate", 0.6) or 0.6),
+                max_false_flag_rate=float(extra.get("regressionMaxFalseFlagRate", 0.15) or 0.15),
+            )
+            emit("regression_audit", **audit)
+            print(json.dumps({"type": "regression_audit", **audit}, ensure_ascii=False), flush=True)
+        except Exception as e:
+            emit("regression_audit", error=str(e))
+            print(json.dumps({"type": "regression_audit", "error": str(e)}, ensure_ascii=False), flush=True)
+        result("failed", workspace=ws)
+        return
+
+    if bool(extra.get("offlineEvalMode", False)):
+        try:
+            from solver.offline_eval import run_offline_eval as _run_offline_eval
+            dataset_path = str(extra.get("offlineEvalDataset", "") or "")
+            if not dataset_path:
+                raise RuntimeError("offlineEvalDataset is required")
+            audit = _run_offline_eval(
+                dataset_path=dataset_path,
+                benchmark_path=os.path.join((ws or base_dir or os.getcwd()), ".solver", "benchmark_history.json"),
+                gates=extra.get("benchmarkGates", {}) if isinstance(extra.get("benchmarkGates", {}), dict) else {},
+            )
+            emit("offline_eval", **audit)
+            print(json.dumps({"type": "offline_eval", **audit}, ensure_ascii=False), flush=True)
+        except Exception as e:
+            emit("offline_eval", error=str(e))
+            print(json.dumps({"type": "offline_eval", "error": str(e)}, ensure_ascii=False), flush=True)
         result("failed", workspace=ws)
         return
 
@@ -2060,6 +2102,7 @@ def _run_solve_impl(payload):
             learned_overrides = _get_learned_overrides(priors_path, cat)
         except Exception:
             learned_overrides = {}
+    bench_hist = []
     try:
         if os.path.exists(benchmark_path):
             with open(benchmark_path, "r", encoding="utf-8") as f:
@@ -2069,6 +2112,17 @@ def _run_solve_impl(payload):
                 if last_bench.get("verdict") == "fail" and bool(last_bench.get("regressed", False)):
                     learned_overrides = {}
                     emit("policy_reject", reason="previous_regression")
+    except Exception:
+        pass
+
+    try:
+        from solver.control_plane import tune_runtime_knobs as _tune_runtime_knobs
+        tuned = _tune_runtime_knobs(cat, learned_overrides, bench_hist[-25:] if isinstance(bench_hist, list) else [])
+        if isinstance(learned_overrides, dict):
+            learned_overrides = {**learned_overrides, **tuned}
+        if "enableSelfPlayDebate" in tuned and "enableSelfPlayDebate" not in extra:
+            extra["enableSelfPlayDebate"] = bool(tuned.get("enableSelfPlayDebate", True))
+        emit("control_plane", tuned=tuned)
     except Exception:
         pass
 
@@ -2101,6 +2155,8 @@ def _run_solve_impl(payload):
         }
 
     def _finalize_policy_and_benchmark(status: str, solved_flag: str = "") -> None:
+        bench = None
+        benchmark_pass = False
         if bandit:
             try:
                 bandit.save()
@@ -2142,11 +2198,30 @@ def _run_solve_impl(payload):
                     "time_to_flag": elapsed_total if solved else float(9999.0),
                 }
                 bench = _benchmark_evaluate(metrics, benchmark_path, gates=extra.get("benchmarkGates", {}))
+                benchmark_pass = bool(bench.get("verdict") == "pass")
                 emit("benchmark_gate", **bench)
                 if bench.get("verdict") != "pass":
                     emit("policy_reject", reason="benchmark_gate_failed", details=bench.get("reasons", []))
             except Exception:
                 pass
+        try:
+            from solver.policy_guard import snapshot_policy as _snapshot_policy
+            from solver.policy_guard import latest_good_snapshot as _latest_good_snapshot
+            from solver.policy_guard import rollback_to_snapshot as _rollback_to_snapshot
+            meta = {
+                "status": status,
+                "benchmark_pass": benchmark_pass,
+                "category": cat,
+                "difficulty": diff,
+                "challenge": name,
+            }
+            _snapshot_policy(policy_dir, priors_path, benchmark_path, metadata=meta)
+            if (bench is not None) and not benchmark_pass and bool(bench.get("regressed", False)):
+                snap = _latest_good_snapshot(policy_dir)
+                if snap and _rollback_to_snapshot(policy_dir, priors_path, snap):
+                    emit("policy_rollback", restored=snap.get("version_id", ""), reason="benchmark_regressed")
+        except Exception:
+            pass
 
     if bool(extra.get("resumeCheckpoint", True)):
         resume_state = core_checkpoint.load_checkpoint(final_ws or ws or base_dir or os.getcwd(), name)
@@ -2220,7 +2295,9 @@ def _run_solve_impl(payload):
 
         # ── Multi-model routing ──────────────────────────────────────────────
         progress_gap = (iteration - last_progress_iter if last_progress_iter else iteration) + contradiction_penalty
-        route_decision = _route_model_v2(
+        from solver.routing_controller import build_route_decision as _build_route_decision
+        route_decision = _build_route_decision(
+            _route_model_v2,
             category=cat,
             difficulty=diff,
             iteration=iteration,
@@ -2283,8 +2360,13 @@ def _run_solve_impl(payload):
             reasons=route_decision.get("reasons", []),
             opus_budget_remaining=opus_budget_remaining,
         )
-        debate_threshold = 65 if diff in ("hard", "insane") else 80
-        if (not debate_used) and _run_self_play_debate and _render_debate_for_prompt and int(route_decision.get("route_score", 0)) >= debate_threshold:
+        from solver.routing_controller import should_trigger_debate as _should_trigger_debate
+        if _run_self_play_debate and _render_debate_for_prompt and _should_trigger_debate(
+            route_score=int(route_decision.get("route_score", 0)),
+            difficulty=diff,
+            debate_used=debate_used,
+            debate_enabled=bool(extra.get("enableSelfPlayDebate", True)),
+        ):
             try:
                 debate = _run_self_play_debate(
                     challenge_description=augmented_desc,

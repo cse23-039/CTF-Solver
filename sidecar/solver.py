@@ -206,6 +206,7 @@ from solver.engine import (
     _update_autonomous_phase, _run_branch, run_parallel_branches,
     run_import, _run_solve_impl, run_solve,
 )
+from solver.offline_eval import run_offline_eval
 
 # ── Globals ───────────────────────────────────────────────────────────────────
 _TOKEN_CACHE = TokenizationCache(max_size=384)
@@ -231,6 +232,14 @@ def main():
         run_benchmark(payload)
     elif mode == "import":
         run_import(payload)
+    elif mode == "offline_eval":
+        dataset_path = str(payload.get("dataset_path", "") or "")
+        benchmark_path = str(payload.get("benchmark_path", "") or "")
+        if not dataset_path or not benchmark_path:
+            emit("error", message="offline_eval requires dataset_path and benchmark_path")
+            sys.exit(1)
+        out = run_offline_eval(dataset_path=dataset_path, benchmark_path=benchmark_path, gates=payload.get("gates", {}))
+        print(json.dumps({"type": "offline_eval", **out}, ensure_ascii=False), flush=True)
     else:
         emit("error", message=f"Unknown mode: {mode}")
         sys.exit(1)

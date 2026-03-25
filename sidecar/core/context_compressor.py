@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 MAX_TOOL_RESULT_CHARS = 2800
+MAX_TEXT_BLOCK_CHARS = 1800
 MAX_MESSAGES_BEFORE_COMPRESS = 14
 KEEP_RECENT_MESSAGES = 8
 
@@ -35,6 +36,23 @@ def compress_tool_result(content: str) -> str:
     return result
 
 
+def compress_text_block(content: str) -> str:
+    """Compress long narrative blocks while preserving high-signal lines."""
+    if not content or len(content) <= MAX_TEXT_BLOCK_CHARS:
+        return content
+
+    lines = str(content).splitlines()
+    priority = [line for line in lines if _PRIORITY_RE.search(line)]
+    rest = [line for line in lines if not _PRIORITY_RE.search(line)]
+    head = rest[:20]
+    tail = rest[-20:]
+    marker = ["...[middle trimmed for context efficiency]..."] if len(rest) > 40 else []
+    result = "\n".join(priority + head + marker + tail)
+    if len(result) > MAX_TEXT_BLOCK_CHARS:
+        return result[:MAX_TEXT_BLOCK_CHARS] + "\n...[truncated]..."
+    return result
+
+
 def maybe_compress_messages(messages: list) -> list:
     """
     Compress old tool results when conversation history grows large.
@@ -53,9 +71,14 @@ def maybe_compress_messages(messages: list) -> list:
 
     compressed_middle = []
     for msg in middle:
-        if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+        content = msg.get("content")
+        if isinstance(content, str):
+            compressed_middle.append({**msg, "content": compress_text_block(content)})
+            continue
+
+        if isinstance(content, list):
             new_content = []
-            for block in msg["content"]:
+            for block in content:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
                     inner = block.get("content", [])
                     new_inner = []
@@ -65,6 +88,10 @@ def maybe_compress_messages(messages: list) -> list:
                             item = {**item, "text": compressed_text}
                         new_inner.append(item)
                     new_content.append({**block, "content": new_inner})
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    new_content.append({**block, "text": compress_text_block(block.get("text", ""))})
+                elif isinstance(block, str):
+                    new_content.append(compress_text_block(block))
                 else:
                     new_content.append(block)
             compressed_middle.append({**msg, "content": new_content})
