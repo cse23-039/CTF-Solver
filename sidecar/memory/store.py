@@ -6,6 +6,8 @@ import os
 import re
 import time
 
+from solver.storage_retention import prune_jsonl
+
 
 def memory_v2_path() -> str:
     return os.path.expanduser("~/.ctf-solver/challenge_memory_v2.jsonl")
@@ -58,6 +60,7 @@ def store_memory_v2(record: dict) -> None:
             record["memory_type"] = "semantic"
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    prune_jsonl(path, max_lines=180000, max_bytes=256 * 1024 * 1024)
 
 
 def memory_trust_score(rec: dict, ctf_name: str = "", category: str = "", query_fingerprint: str = "") -> float:

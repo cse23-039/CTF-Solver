@@ -55,6 +55,23 @@ def latest_good_snapshot(policy_dir: str) -> dict[str, Any] | None:
     return versions[-1]
 
 
+def latest_good_snapshot_for_cohort(policy_dir: str, category: str, difficulty: str) -> dict[str, Any] | None:
+    versions = _safe_load(_history_path(policy_dir), [])
+    if not isinstance(versions, list) or not versions:
+        return None
+    cat = str(category or "").strip().lower()
+    diff = str(difficulty or "").strip().lower()
+    for rec in reversed(versions):
+        meta = rec.get("metadata", {}) if isinstance(rec.get("metadata", {}), dict) else {}
+        if str(meta.get("category", "")).strip().lower() != cat:
+            continue
+        if str(meta.get("difficulty", "")).strip().lower() != diff:
+            continue
+        if bool(meta.get("benchmark_pass", False)):
+            return rec
+    return None
+
+
 def rollback_to_snapshot(policy_dir: str, priors_path: str, snapshot: dict[str, Any]) -> bool:
     if not snapshot or not isinstance(snapshot, dict):
         return False

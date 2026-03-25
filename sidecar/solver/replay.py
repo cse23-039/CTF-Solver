@@ -6,6 +6,8 @@ import os
 import time
 from typing import Any
 
+from solver.storage_retention import prune_jsonl
+
 
 def append_replay(path: str, state: dict[str, Any], action: dict[str, Any], outcome: dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -17,6 +19,7 @@ def append_replay(path: str, state: dict[str, Any], action: dict[str, Any], outc
     }
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    prune_jsonl(path, max_lines=120000, max_bytes=128 * 1024 * 1024)
 
 
 def replay(path: str, limit: int = 200) -> list[dict[str, Any]]:

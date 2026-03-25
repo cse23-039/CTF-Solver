@@ -207,6 +207,8 @@ from solver.engine import (
     run_import, _run_solve_impl, run_solve,
 )
 from solver.offline_eval import run_offline_eval
+from solver.chaos_harness import run_chaos_harness
+from solver.counterfactual_learning import derive_counterfactual_deltas
 
 # ── Globals ───────────────────────────────────────────────────────────────────
 _TOKEN_CACHE = TokenizationCache(max_size=384)
@@ -240,6 +242,17 @@ def main():
             sys.exit(1)
         out = run_offline_eval(dataset_path=dataset_path, benchmark_path=benchmark_path, gates=payload.get("gates", {}))
         print(json.dumps({"type": "offline_eval", **out}, ensure_ascii=False), flush=True)
+    elif mode == "chaos_audit":
+        out = run_chaos_harness(seed=int(payload.get("seed", 42) or 42), rounds=int(payload.get("rounds", 40) or 40))
+        print(json.dumps({"type": "chaos_harness", **out}, ensure_ascii=False), flush=True)
+    elif mode == "counterfactual":
+        replay_path = str(payload.get("replay_path", "") or "")
+        output_path = str(payload.get("output_path", "") or "")
+        if not replay_path or not output_path:
+            emit("error", message="counterfactual requires replay_path and output_path")
+            sys.exit(1)
+        out = derive_counterfactual_deltas(replay_path=replay_path, output_path=output_path, limit=int(payload.get("limit", 3000) or 3000))
+        print(json.dumps({"type": "counterfactual", **out}, ensure_ascii=False), flush=True)
     else:
         emit("error", message=f"Unknown mode: {mode}")
         sys.exit(1)

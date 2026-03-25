@@ -418,6 +418,11 @@ def _persist_evidence_record(workspace: str, record: dict) -> str:
     ).hexdigest()[:16]
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(clean, ensure_ascii=False) + "\n")
+    try:
+        from solver.storage_retention import prune_jsonl as _prune_jsonl
+        _prune_jsonl(path, max_lines=120000, max_bytes=128 * 1024 * 1024)
+    except Exception:
+        pass
     return path
 
 
@@ -1353,6 +1358,16 @@ def _run_solve_impl(payload):
     memory_diag = _analyze_memory_consistency(memory_hits)
     trusted_memory_hits = memory_diag.get("trusted_hits", [])
     memory_ctx = _build_memory_injection(trusted_memory_hits or memory_hits)
+    challenge_family = "general"
+    transfer_tactics = []
+    try:
+        from solver.transfer_learning import infer_challenge_family as _infer_challenge_family, preload_tactics as _preload_tactics
+        challenge_family = _infer_challenge_family(name=name, description=augmented_desc, category=cat)
+        transfer_tactics = _preload_tactics(challenge_family, trusted_memory_hits or memory_hits)
+        emit("transfer_learning", family=challenge_family, tactic_count=len(transfer_tactics))
+    except Exception:
+        challenge_family = "general"
+        transfer_tactics = []
     emit(
         "memory_retrieval",
         hits=len(memory_hits),
@@ -1484,6 +1499,11 @@ def _run_solve_impl(payload):
         pb.add(f"\n{cross_ctf_ctx}\n")
     if rag_ctx:
         pb.add(f"\n{rag_ctx}\n")
+    if transfer_tactics:
+        pb.add("\n## Cross-Challenge Transfer Tactics\n")
+        pb.add(f"Family: {challenge_family}\n")
+        for t in transfer_tactics[:8]:
+            pb.add(f"- {t}\n")
     pb.add("\n**METHODOLOGY**: planner+specialists → hypothesis tree + pruning → tool graph execution → parallel branches → autonomous recon→exploit→refine loop → validator gate → submit_flag → evidence-backed WRITEUP.md")
     pb.add("\n\n**CREDIT GUARD (MANDATORY)**: be frugal with API usage; prefer tool-driven/local reasoning first, minimize repeated long outputs, and avoid expensive model escalation unless evidence shows clear expected gain.")
     user_msg = pb.build()
@@ -1555,6 +1575,21 @@ def _run_solve_impl(payload):
         result("failed", workspace=ws)
         return
 
+    if bool(extra.get("chaosHarnessMode", False)):
+        try:
+            from solver.chaos_harness import run_chaos_harness as _run_chaos_harness
+            audit = _run_chaos_harness(
+                seed=int(extra.get("chaosSeed", 42) or 42),
+                rounds=int(extra.get("chaosRounds", 40) or 40),
+            )
+            emit("chaos_harness", **audit)
+            print(json.dumps({"type": "chaos_harness", **audit}, ensure_ascii=False), flush=True)
+        except Exception as e:
+            emit("chaos_harness", error=str(e))
+            print(json.dumps({"type": "chaos_harness", "error": str(e)}, ensure_ascii=False), flush=True)
+        result("failed", workspace=ws)
+        return
+
     # ── Phase-3 adaptive engines (lazy imports to avoid hard startup dependency) ──
     _rank_branches_live = None
     _symbolic_orchestrate_live = None
@@ -1588,6 +1623,12 @@ def _run_solve_impl(payload):
     _fetch_live_writeup_hint = None
     _score_flag_candidate = None
     _maybe_compress_messages = None
+    _BeliefGraph = None
+    _run_council = None
+    _compute_slo_pressure = None
+    _decide_slo_controls = None
+    _ToolChainPolicy = None
+    _detect_hint_deception = None
     try:
         from solver.unified_scorer import rank_branches as _rank_branches_live
     except Exception:
@@ -1697,6 +1738,27 @@ def _run_solve_impl(payload):
         from core.context_compressor import maybe_compress_messages as _maybe_compress_messages
     except Exception:
         _maybe_compress_messages = None
+    try:
+        from solver.belief_graph import BeliefGraph as _BeliefGraph
+    except Exception:
+        _BeliefGraph = None
+    try:
+        from solver.council import run_council as _run_council
+    except Exception:
+        _run_council = None
+    try:
+        from solver.slo_controller import compute_pressure as _compute_slo_pressure, decide_controls as _decide_slo_controls
+    except Exception:
+        _compute_slo_pressure = None
+        _decide_slo_controls = None
+    try:
+        from solver.tool_chain_policy import ToolChainPolicy as _ToolChainPolicy
+    except Exception:
+        _ToolChainPolicy = None
+    try:
+        from solver.deception_guard import detect_hint_deception as _detect_hint_deception
+    except Exception:
+        _detect_hint_deception = None
 
     preflight = _run_self_healing_preflight(cat)
     emit(
@@ -1712,6 +1774,17 @@ def _run_solve_impl(payload):
         user_msg += f"{preflight.get('summary','')}\n"
         for item in preflight.get("fallback_plan", [])[:10]:
             user_msg += f"- {item}\n"
+
+    deception_risk = 0.0
+    if _detect_hint_deception:
+        try:
+            dec = _detect_hint_deception(description=augmented_desc, hints=explicit_hints)
+            deception_risk = float(dec.get("risk", 0.0) or 0.0)
+            emit("deception_guard", risk=deception_risk, suspicious=bool(dec.get("suspicious", False)), flags=dec.get("flags", []))
+            if bool(dec.get("suspicious", False)):
+                user_msg += "\n## Deception Guard\nPotentially conflicting/poisoned hints detected. Require disconfirming checks before trusting challenge hints.\n"
+        except Exception:
+            deception_risk = 0.0
 
     planner_summary = ""
     planner_evidence = []
@@ -1776,6 +1849,15 @@ def _run_solve_impl(payload):
         for h in planner_hypotheses:
             branch_stats[h] = {"name": h, "pulls": 1, "wins": 0}
         emit("hypothesis_lifecycle", summary=hyp_manager.summary()[:8])
+    if belief_graph and planner_hypotheses:
+        try:
+            for h in planner_hypotheses[:10]:
+                belief_graph.upsert_hypothesis(h, confidence=0.55, tags=[cat, diff])
+                for tool_name in (playbook.get("tools", []) or [])[:6]:
+                    belief_graph.connect(f"tool:{tool_name}", h, weight=0.6)
+            emit("belief_graph", event="seeded", hypotheses=len(planner_hypotheses[:10]))
+        except Exception:
+            pass
 
     exploit_automation = _run_exploit_dev_automation(cat, challenge_ctx, ws or base_dir, extra)
     if exploit_automation.get("enabled", False):
@@ -1944,6 +2026,8 @@ def _run_solve_impl(payload):
                             "dead_ends": [],
                             "summary": f"Parallel branch winner. Flag={found_flag}",
                             "validator": validation,
+                            "memory_type": "proof_artifact" if validation.get("verdict") == "pass" else "episodic",
+                            "why_it_worked": "parallel branch won and validator accepted",
                             "source_strength": 0.75,
                             "reproducibility_count": 1,
                             "workspace": ws,
@@ -2085,6 +2169,7 @@ def _run_solve_impl(payload):
     benchmark_path = os.path.join(policy_dir, "benchmark_history.json")
     bandit_path = os.path.join(policy_dir, "tool_bandit.json")
     replay_path = os.path.join(policy_dir, "decision_replay.jsonl")
+    chain_policy_path = os.path.join(policy_dir, "tool_chain_policy.json")
     learned_overrides = {}
     bandit = None
     if _ContextualBandit:
@@ -2093,6 +2178,11 @@ def _run_solve_impl(payload):
         except Exception:
             bandit = None
     hyp_manager = _HypothesisManager() if _HypothesisManager else None
+    belief_graph = _BeliefGraph() if _BeliefGraph else None
+    chain_policy = _ToolChainPolicy(chain_policy_path) if _ToolChainPolicy else None
+    council_submit_blocked = False
+    council_action = "continue"
+    council_throttle = False
     branch_stats: dict[str, dict] = {}
     if _get_learned_overrides:
         try:
@@ -2117,12 +2207,15 @@ def _run_solve_impl(payload):
 
     try:
         from solver.control_plane import tune_runtime_knobs as _tune_runtime_knobs
+        from solver.canary_rollout import canary_accept as _canary_accept
         tuned = _tune_runtime_knobs(cat, learned_overrides, bench_hist[-25:] if isinstance(bench_hist, list) else [])
-        if isinstance(learned_overrides, dict):
+        cohort = f"{str(cat).lower()}|{str(diff).lower()}"
+        canary_ok = _canary_accept(cohort=cohort, challenge_name=name, percent=float(extra.get("policyCanaryPercent", 0.35) or 0.35))
+        if canary_ok and isinstance(learned_overrides, dict):
             learned_overrides = {**learned_overrides, **tuned}
-        if "enableSelfPlayDebate" in tuned and "enableSelfPlayDebate" not in extra:
-            extra["enableSelfPlayDebate"] = bool(tuned.get("enableSelfPlayDebate", True))
-        emit("control_plane", tuned=tuned)
+            if "enableSelfPlayDebate" in tuned and "enableSelfPlayDebate" not in extra:
+                extra["enableSelfPlayDebate"] = bool(tuned.get("enableSelfPlayDebate", True))
+        emit("control_plane", tuned=tuned, cohort=cohort, canary_applied=canary_ok)
     except Exception:
         pass
 
@@ -2160,6 +2253,11 @@ def _run_solve_impl(payload):
         if bandit:
             try:
                 bandit.save()
+            except Exception:
+                pass
+        if chain_policy:
+            try:
+                chain_policy.save()
             except Exception:
                 pass
         if _append_iteration_telemetry:
@@ -2207,6 +2305,7 @@ def _run_solve_impl(payload):
         try:
             from solver.policy_guard import snapshot_policy as _snapshot_policy
             from solver.policy_guard import latest_good_snapshot as _latest_good_snapshot
+            from solver.policy_guard import latest_good_snapshot_for_cohort as _latest_good_snapshot_for_cohort
             from solver.policy_guard import rollback_to_snapshot as _rollback_to_snapshot
             meta = {
                 "status": status,
@@ -2217,11 +2316,35 @@ def _run_solve_impl(payload):
             }
             _snapshot_policy(policy_dir, priors_path, benchmark_path, metadata=meta)
             if (bench is not None) and not benchmark_pass and bool(bench.get("regressed", False)):
-                snap = _latest_good_snapshot(policy_dir)
+                snap = _latest_good_snapshot_for_cohort(policy_dir, cat, diff) or _latest_good_snapshot(policy_dir)
                 if snap and _rollback_to_snapshot(policy_dir, priors_path, snap):
                     emit("policy_rollback", restored=snap.get("version_id", ""), reason="benchmark_regressed")
         except Exception:
             pass
+        if status != "solved":
+            try:
+                from solver.counterfactual_learning import derive_counterfactual_deltas as _derive_counterfactual_deltas
+                deltas = _derive_counterfactual_deltas(
+                    replay_path=replay_path,
+                    output_path=os.path.join(policy_dir, "counterfactual_deltas.json"),
+                    limit=4000,
+                )
+                emit("counterfactual_learning", **deltas)
+            except Exception:
+                pass
+            try:
+                from solver.curriculum_learning import append_curriculum_item as _append_curriculum_item, build_failure_curriculum_item as _build_failure_curriculum_item
+                item = _build_failure_curriculum_item(
+                    category=cat,
+                    difficulty=diff,
+                    challenge=name,
+                    failed_tools=tool_call_history[-20:],
+                    reason="solve_failed_or_budget_exhausted",
+                )
+                _append_curriculum_item(os.path.join(policy_dir, "curriculum_queue.json"), item)
+                emit("curriculum", event="queued", challenge=name, category=cat, difficulty=diff)
+            except Exception:
+                pass
 
     if bool(extra.get("resumeCheckpoint", True)):
         resume_state = core_checkpoint.load_checkpoint(final_ws or ws or base_dir or os.getcwd(), name)
@@ -2293,6 +2416,28 @@ def _run_solve_impl(payload):
             "difficulty_pressure": max(0.0, min(1.0, (fruitless + tool_failures) / 8.0)),
         }
 
+        dynamic_max_tool_calls = int(extra.get("maxToolCallsPerIteration", 3) or 3)
+        dynamic_force_local_only = bool(human_loop.get("force_local_only", False))
+        if _compute_slo_pressure and _decide_slo_controls:
+            try:
+                elapsed_so_far = max(1.0, time.time() - _solve_start_time)
+                p95_proxy = elapsed_so_far / max(1.0, float(iteration))
+                burn_velocity = float(credit_guard.get("spent_usd", 0.0) or 0.0) / elapsed_so_far
+                error_rate = float(tool_failures) / max(1.0, float(iteration))
+                pressure = _compute_slo_pressure(
+                    p95_latency_s=float(p95_proxy),
+                    queue_depth=0,
+                    error_rate=error_rate,
+                    burn_velocity=burn_velocity,
+                )
+                controls = _decide_slo_controls(pressure)
+                dynamic_max_tool_calls = min(dynamic_max_tool_calls, int(controls.get("max_tool_calls", dynamic_max_tool_calls)))
+                dynamic_force_local_only = bool(dynamic_force_local_only or controls.get("force_local_only", False))
+                if bool(controls.get("throttle", False)):
+                    emit("slo_controller", iteration=iteration, **controls)
+            except Exception:
+                pass
+
         # ── Multi-model routing ──────────────────────────────────────────────
         progress_gap = (iteration - last_progress_iter if last_progress_iter else iteration) + contradiction_penalty
         from solver.routing_controller import build_route_decision as _build_route_decision
@@ -2360,6 +2505,37 @@ def _run_solve_impl(payload):
             reasons=route_decision.get("reasons", []),
             opus_budget_remaining=opus_budget_remaining,
         )
+        if _run_council:
+            try:
+                council = _run_council({
+                    "fruitless": fruitless,
+                    "tool_failures": tool_failures,
+                    "route_score": route_decision.get("route_score", 0),
+                    "evidence_count": len(evidence_log),
+                    "min_evidence": int(extra.get("minEvidenceBeforeFlag", 2) or 2),
+                    "remaining_usd": _credit_remaining_usd(credit_guard),
+                    "reserve_usd": float(credit_guard.get("reserve_usd", 0.0) or 0.0),
+                    "token_burn_velocity": float((credit_guard.get("spent_usd", 0.0) or 0.0) / max(1.0, (time.time() - _solve_start_time))),
+                    "belief_uncertainty": float(belief_graph.global_uncertainty()) if belief_graph else 1.0,
+                    "belief_contradiction": float(belief_graph.contradiction_ratio()) if belief_graph else 0.0,
+                    "hallucination_risk": float(min(1.0, deception_risk + (0.2 if bool(critic_hard_block_until_iter >= iteration) else 0.0))),
+                })
+                council_action = str(council.get("action", "continue"))
+                council_submit_blocked = bool(council.get("submit_blocked", False))
+                council_throttle = bool(council.get("throttle", False))
+                emit("council", iteration=iteration, action=council_action, veto=bool(council.get("veto", False)), throttle=council_throttle, submit_blocked=council_submit_blocked)
+                if council_action in ("pivot", "disambiguate") and iteration > 1:
+                    tests = []
+                    if belief_graph and council_action == "disambiguate":
+                        try:
+                            tests = belief_graph.propose_disambiguation_tests(max_items=3)
+                        except Exception:
+                            tests = []
+                    hint = f"Suggested tests: {tests}" if tests else "Run a low-cost disambiguation step before continuing."
+                    messages.append({"role": "user", "content": f"[COUNCIL] action={council_action}. {hint}"})
+            except Exception:
+                council_submit_blocked = False
+                council_throttle = False
         from solver.routing_controller import should_trigger_debate as _should_trigger_debate
         if _run_self_play_debate and _render_debate_for_prompt and _should_trigger_debate(
             route_score=int(route_decision.get("route_score", 0)),
@@ -2883,6 +3059,8 @@ def _run_solve_impl(payload):
         tool_candidates = []
         for block in ordered_content:
             if getattr(block, "type", None) == "tool_use":
+                if dynamic_force_local_only and getattr(block, "name", "") in _NETWORK_TOOLS:
+                    continue
                 tool_candidates.append({
                     "name": getattr(block, "name", ""),
                     "block": block,
@@ -2910,6 +3088,16 @@ def _run_solve_impl(payload):
                     ranked.sort(key=lambda r: (0.65 * b_score.get(str(r.get("name", "")), 0.5)) + (0.35 * merged_rel.get(str(r.get("name", "")), 0.5)), reverse=True)
                 except Exception:
                     pass
+            if chain_policy and last_chain_tool:
+                try:
+                    chain_rank = chain_policy.rerank([str(r.get("name", "")) for r in ranked], prev_tool=last_chain_tool)
+                    rank_pos = {n: i for i, n in enumerate(chain_rank)}
+                    ranked.sort(key=lambda r: rank_pos.get(str(r.get("name", "")), 9999))
+                except Exception:
+                    pass
+            if council_throttle:
+                dynamic_max_tool_calls = min(dynamic_max_tool_calls, 1)
+            ranked = ranked[: max(1, int(dynamic_max_tool_calls))]
             ranked_blocks = [r["block"] for r in ranked]
             non_tools = [b for b in ordered_content if getattr(b, "type", None) != "tool_use"]
             ordered_content = non_tools + ranked_blocks
@@ -3040,6 +3228,11 @@ def _run_solve_impl(payload):
                         bandit_updates.append({"iteration": iteration, "tool": tname, "quality": round(q_score, 4)})
                     except Exception:
                         pass
+                if chain_policy and last_chain_tool:
+                    try:
+                        chain_policy.update(f"{last_chain_tool}->{tname}", success=bool(tool_ok))
+                    except Exception:
+                        pass
                 if _append_replay:
                     try:
                         _append_replay(
@@ -3121,6 +3314,17 @@ def _run_solve_impl(payload):
                     "extractable_facts": tool_grade.get("extractable_facts", []),
                     "noise_ratio": float(tool_grade.get("noise_ratio", 0.0)),
                 })
+                if belief_graph:
+                    try:
+                        bup = belief_graph.update_from_evidence(
+                            tool=tname,
+                            output=str(tout),
+                            success=bool(tool_ok),
+                            quality=float(tool_grade.get("quality", 0.5) or 0.5),
+                        )
+                        emit("belief_graph", iteration=iteration, event="evidence_update", **bup)
+                    except Exception:
+                        pass
                 if _record_chain_edge and last_chain_tool:
                     try:
                         chain_edge = _record_chain_edge(
@@ -3251,6 +3455,13 @@ def _run_solve_impl(payload):
 
         # ── Flag found ───────────────────────────────────────────────────────
         if found_flag:
+            if council_submit_blocked:
+                false_flag_candidates += 1
+                emit("zero_trust_gate", iteration=iteration, blocked=True, reason="council_submit_blocked")
+                messages.append({"role": "user", "content": "[ZERO-TRUST GATE] Council blocked submission. Gather more reproducible evidence and reduce contradictions first."})
+                found_flag = None
+                fruitless += 1
+                continue
             min_evidence = int(extra.get("minEvidenceBeforeFlag", 2))
             if len(evidence_log) < min_evidence:
                 false_flag_candidates += 1
@@ -3267,6 +3478,20 @@ def _run_solve_impl(payload):
                     f"Candidate flag detected but evidence_count={len(evidence_log)} < required={min_evidence}.\n"
                     "Collect additional reproducible tool evidence before validating/submitting."
                 })
+                found_flag = None
+                fruitless += 1
+                continue
+            repro = _reproducibility_check(found_flag, evidence_log, solve_log)
+            emit("zero_trust_gate", iteration=iteration, reproducibility=repro)
+            if repro.get("verdict") != "pass":
+                false_flag_candidates += 1
+                messages.append({"role": "user", "content": "[ZERO-TRUST GATE] Reproducibility check failed. Re-run extraction path and gather corroborating tool output."})
+                found_flag = None
+                fruitless += 1
+                continue
+            if belief_graph and float(belief_graph.contradiction_ratio()) > float(extra.get("maxBeliefContradictionForSubmit", 0.4) or 0.4):
+                false_flag_candidates += 1
+                emit("zero_trust_gate", iteration=iteration, blocked=True, reason="belief_contradiction_high", contradiction_ratio=belief_graph.contradiction_ratio())
                 found_flag = None
                 fruitless += 1
                 continue
@@ -3360,6 +3585,9 @@ def _run_solve_impl(payload):
                     "dead_ends": pivot_events[-8:],
                     "summary": summary[:2000],
                     "validator": validation,
+                    "memory_type": "proof_artifact" if (validation.get("verdict") == "pass" and len(evidence_log) >= 3) else "episodic",
+                    "why_it_worked": strategy.get("mode", ""),
+                    "why_failed_before": pivot_events[-6:],
                     "source_strength": 0.85 if len(evidence_log) >= 3 else 0.7,
                     "reproducibility_count": max(1, len([e for e in evidence_log[-20:] if bool(e.get("success", False))])),
                     "model_route": route_history[-12:],

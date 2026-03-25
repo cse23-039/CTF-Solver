@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Any, Callable
 
+from solver.storage_retention import prune_jsonl
+
 
 class AutoSolveQueue:
     def __init__(
@@ -42,6 +44,8 @@ class AutoSolveQueue:
         os.makedirs(self._persist_dir, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        max_bytes = 64 * 1024 * 1024 if path.endswith("pending.jsonl") else 128 * 1024 * 1024
+        prune_jsonl(path, max_lines=200000, max_bytes=max_bytes)
 
     def _rewrite_pending_without(self, lease_id: str) -> None:
         if not self._persist_dir:
