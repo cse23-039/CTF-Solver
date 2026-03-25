@@ -2,24 +2,24 @@
 
 /* ── CSS Variables (all overridable from UI) ────────────────────────────── */
 :root {
-  --bg-root:    #040404;
-  --bg-panel:   #080808;
-  --bg-panel2:  #0d0d0d;
-  --bg-header:  #111111;
-  --bg-hover:   #141414;
-  --bg-select:  #181818;
-  --bg-input:   #0a0a0a;
-  --border-dim:    #1a1a1a;
-  --border:        #242424;
-  --border-bright: #333333;
-  --border-white:  #444444;
-  --text-dim:    #3a3a3a;
-  --text-mid:    #666666;
-  --text-base:   #909090;
-  --text-bright: #c8c8c8;
-  --text-white:  #f0f0f0;
+  --bg-root:    #121722;
+  --bg-panel:   #171d2b;
+  --bg-panel2:  #1b2233;
+  --bg-header:  #20293d;
+  --bg-hover:   #27324a;
+  --bg-select:  #2d3a56;
+  --bg-input:   #151d2d;
+  --border-dim:    #2d3852;
+  --border:        #3c4b6b;
+  --border-bright: #56709e;
+  --border-white:  #7e9bce;
+  --text-dim:    #8fa5cd;
+  --text-mid:    #b2c3e1;
+  --text-base:   #c5d3ed;
+  --text-bright: #e2ecff;
+  --text-white:  #f2f7ff;
   --text-pure:   #ffffff;
-  --accent:         #e8e8e8;
+  --accent:         #8ab4ff;
   --accent-dim:     rgba(255,255,255,0.06);
   --accent-border:  rgba(255,255,255,0.18);
   --font: 'JetBrains Mono', monospace;

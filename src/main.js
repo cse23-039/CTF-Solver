@@ -67,9 +67,9 @@ const DEFAULTS = {
   fontSize:        12,
   lineHeight:      1.6,
   font:            "'JetBrains Mono', monospace",
-  colBg:           '#040404',
-  colAccent:       '#e8e8e8',
-  colBorder:       '#242424',
+  colBg:           '#121722',
+  colAccent:       '#8ab4ff',
+  colBorder:       '#3c4b6b',
   showKb:          true,
   scanlines:       true,
   blinkCursor:     true,
@@ -103,6 +103,14 @@ function loadSettings() {
   try {
     const s = localStorage.getItem('ctf-solver-v2');
     if (s) settings = Object.assign(deepClone(DEFAULTS), JSON.parse(s));
+    const legacyBg = (settings.colBg || '').toLowerCase() === '#040404';
+    const legacyAcc = (settings.colAccent || '').toLowerCase() === '#e8e8e8';
+    const legacyBrd = (settings.colBorder || '').toLowerCase() === '#242424';
+    if (legacyBg && legacyAcc && legacyBrd) {
+      settings.colBg = DEFAULTS.colBg;
+      settings.colAccent = DEFAULTS.colAccent;
+      settings.colBorder = DEFAULTS.colBorder;
+    }
   } catch(_) {}
 }
 function persistSettings() {
