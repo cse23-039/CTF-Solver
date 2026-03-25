@@ -80,10 +80,25 @@ def retrain_priors(telemetry_path: str, priors_path: str) -> dict[str, Any]:
     priors = {"global": {}, "by_category": {}, "last_retrain_ts": int(time.time())}
 
     for cat, items in by_cat.items():
-        solve_rate = sum(1 for x in items if bool(x.get("solved", False))) / max(1, len(items))
+        solved_items = [x for x in items if bool(x.get("solved", False))]
+        failed_items = [x for x in items if bool(x.get("failed", False)) or not bool(x.get("solved", False))]
+        solve_rate = len(solved_items) / max(1, len(items))
+        fail_rate = len(failed_items) / max(1, len(items))
         avg_fruitless = statistics.mean([float(x.get("fruitless", 0.0)) for x in items])
         avg_failures = statistics.mean([float(x.get("tool_failures", 0.0)) for x in items])
         avg_route = statistics.mean([float(x.get("route_score", 50.0)) for x in items])
+        failed_fruitless = statistics.mean([float(x.get("fruitless", 0.0)) for x in failed_items]) if failed_items else avg_fruitless
+        failed_tool_failures = statistics.mean([float(x.get("tool_failures", 0.0)) for x in failed_items]) if failed_items else avg_failures
+        failed_strategy_counts: dict[str, int] = defaultdict(int)
+        for x in failed_items:
+            mode = str(x.get("strategy_mode", "") or "").strip()
+            if mode:
+                failed_strategy_counts[mode] += 1
+        strategy_penalties = {
+            k: round(min(0.45, (v / max(1, len(failed_items))) * 0.75), 4)
+            for k, v in failed_strategy_counts.items()
+        }
+        dominant_failed_strategy = max(failed_strategy_counts, key=failed_strategy_counts.get) if failed_strategy_counts else ""
         diffs = []
         for x in items:
             if "predicted_difficulty" in x and "actual_iterations" in x and "max_iterations" in x:
@@ -101,10 +116,10 @@ def retrain_priors(telemetry_path: str, priors_path: str) -> dict[str, Any]:
         difficulty_correction = statistics.mean(diffs) if diffs else 0.0
 
         # Learned threshold calibration curves (bounded).
-        route_escalate = max(52, min(82, int(avg_route - 3 + (8 * (1.0 - solve_rate)))))
+        route_escalate = max(50, min(84, int(avg_route - 3 + (10 * fail_rate))))
         route_soft = max(45, min(route_escalate - 6, route_escalate - 10))
-        pivot_fruitless = max(2, min(6, int(round(avg_fruitless + 1))))
-        pivot_tool_failures = max(1, min(5, int(round(avg_failures + 1))))
+        pivot_fruitless = max(2, min(6, int(round((0.55 * avg_fruitless) + (0.45 * failed_fruitless) + 1))))
+        pivot_tool_failures = max(1, min(5, int(round((0.55 * avg_failures) + (0.45 * failed_tool_failures) + 1))))
 
         priors["by_category"][cat] = {
             "route_escalate_score": route_escalate,
@@ -116,6 +131,10 @@ def retrain_priors(telemetry_path: str, priors_path: str) -> dict[str, Any]:
             "difficulty_correction": round(float(difficulty_correction), 3),
             "observations": len(items),
             "solve_rate": round(solve_rate, 4),
+            "fail_rate": round(fail_rate, 4),
+            "failed_observations": len(failed_items),
+            "dominant_failed_strategy": dominant_failed_strategy,
+            "strategy_penalties": strategy_penalties,
         }
 
     _save(priors_path, priors)

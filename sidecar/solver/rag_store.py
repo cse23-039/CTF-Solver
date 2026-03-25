@@ -46,12 +46,24 @@ def _embed_text(text: str, dim: int = 128) -> list[float]:
     except Exception:
         pass
 
+    # Order-aware lexical fallback: token unigrams + bigrams with position weighting.
+    # This is weaker than transformer embeddings but preserves more semantic structure
+    # than naive hash projection and avoids random near-collisions for unrelated tasks.
     vec = [0.0] * dim
-    words = text.lower().split()
-    for word in words:
-        h = hashlib.sha256(word.encode()).digest()
-        for i in range(min(dim, len(h))):
-            vec[i] += (h[i] - 128) / 128.0
+    tokens = [w for w in text.lower().split() if w]
+    if not tokens:
+        return vec
+    grams: list[tuple[str, float]] = []
+    for i, tok in enumerate(tokens):
+        pos_w = 1.0 + (0.15 * (1.0 - (i / max(1, len(tokens)))))
+        grams.append((tok, pos_w))
+        if i + 1 < len(tokens):
+            grams.append((f"{tok}_{tokens[i + 1]}", 1.3 * pos_w))
+    for gram, weight in grams:
+        h = int(hashlib.sha256(gram.encode("utf-8", errors="ignore")).hexdigest()[:16], 16)
+        idx = h % dim
+        sign = 1.0 if ((h >> 8) & 1) == 0 else -1.0
+        vec[idx] += sign * float(weight)
     norm = math.sqrt(sum(x * x for x in vec)) or 1.0
     return [x / norm for x in vec]
 

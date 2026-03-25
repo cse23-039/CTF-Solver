@@ -82,8 +82,8 @@ def memory_trust_score(rec: dict, ctf_name: str = "", category: str = "", query_
     ts = int(rec.get("timestamp", 0) or 0)
     if ts > 0:
         age_days = max(0.0, (time.time() - ts) / 86400.0)
-        decay = min(0.20, age_days * 0.0025)
-        score -= decay
+        # Keep stale memory usable but never equally trusted as fresh evidence.
+        score *= max(0.5, 1.0 - (age_days / 730.0))
 
     return max(0.0, min(1.0, score))
 

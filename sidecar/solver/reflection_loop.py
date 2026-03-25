@@ -79,54 +79,72 @@ def refine_script(script: str, failure_signature: str) -> str:
 def refine_script_with_transforms(script: str, transforms: list[str]) -> str:
     patched = script
     for t in transforms:
-        if t == "stack_align":
-            patched += "\n# transform: stack_align\n# payload += p64(ret_gadget)\n"
-        elif t == "offset_recompute":
-            patched += "\n# transform: offset_recompute\n# use cyclic_find() with fresh crash value\n"
-        elif t == "gadget_swap":
-            patched += "\n# transform: gadget_swap\n# try alternative pop gadget sequence\n"
-        elif t == "canary_leak_phase":
-            patched += "\n# transform: canary_leak_phase\n# stage 1 leak then stage 2 overwrite\n"
-        elif t == "recvuntil_sync":
-            patched += "\n# transform: recvuntil_sync\nio.recvuntil(b':', timeout=2)\n"
-        elif t == "line_discipline":
-            patched += "\n# transform: line_discipline\nio.sendline(payload)\n"
-        elif t == "reduce_waits":
-            patched += "\n# transform: reduce_waits\ncontext.timeout = 2\n"
-        elif t == "trace_io":
-            patched += "\n# transform: trace_io\ncontext.log_level = 'debug'\n"
-        elif t == "guard_none_unpack":
-            patched += "\n# transform: guard_none_unpack\nassert leaked is not None\n"
-        else:
-            patched += f"\n# transform: {t}\n"
+        patched = _ast_patch(patched, t)
     return patched
 
 
 def _ast_patch(script: str, transform: str) -> str:
-    # Parse first to ensure the script stays syntactically valid.
     try:
-        ast.parse(script)
+        tree = ast.parse(script)
     except Exception:
         return script
 
     lines = script.splitlines()
-    inject = []
-    if transform == "trace_io":
-        inject = ["import logging", "logging.basicConfig(level=logging.DEBUG)"]
-    elif transform == "reduce_waits":
-        inject = ["import socket", "socket.setdefaulttimeout(2)"]
-    elif transform == "guard_none_unpack":
-        inject = ["# AST patch: guard unpack", "assert 'None' not in str(locals())"]
-    elif transform == "recvuntil_sync":
-        inject = ["# AST patch: sync boundary", "# io.recvuntil(b':', timeout=2)"]
-    else:
-        inject = [f"# AST patch: {transform}"]
+    line_count = len(lines)
+    insertions: list[tuple[int, str]] = []
 
-    patched = "\n".join(inject + lines)
+    # Build executable patches tied to common exploit variable names.
+    if transform == "trace_io":
+        insertions.append((0, "context.log_level = 'debug'"))
+    elif transform == "reduce_waits":
+        insertions.append((0, "context.timeout = 2"))
+    elif transform == "guard_none_unpack":
+        for i, line in enumerate(lines):
+            if "=" in line and "leak" in line.lower() and "recv" in line.lower():
+                indent = line[: len(line) - len(line.lstrip())]
+                insertions.append((i + 1, indent + "if leaked is None:") )
+                insertions.append((i + 2, indent + "    raise RuntimeError('leak returned None')"))
+                break
+    elif transform == "recvuntil_sync":
+        for i, line in enumerate(lines):
+            if ".send(" in line or ".sendline(" in line:
+                indent = line[: len(line) - len(line.lstrip())]
+                if "recvuntil" not in line:
+                    insertions.append((i, indent + "io.recvuntil(b':', timeout=2)"))
+                break
+    elif transform == "line_discipline":
+        for i, line in enumerate(lines):
+            if ".send(" in line and ".sendline(" not in line:
+                lines[i] = line.replace(".send(", ".sendline(")
+    elif transform == "stack_align":
+        insertions.append((line_count, "if 'payload' in locals() and 'p64' in globals() and 'ret_gadget' in locals():"))
+        insertions.append((line_count + 1, "    payload += p64(ret_gadget)"))
+    elif transform == "offset_recompute":
+        insertions.append((line_count, "if 'cyclic_find' in globals() and 'crash_value' in locals():"))
+        insertions.append((line_count + 1, "    offset = cyclic_find(crash_value)"))
+    elif transform == "gadget_swap":
+        insertions.append((line_count, "if 'alt_pop_rdi' in locals() and 'pop_rdi' in locals():"))
+        insertions.append((line_count + 1, "    pop_rdi = alt_pop_rdi"))
+    elif transform == "canary_leak_phase":
+        insertions.append((line_count, "if 'canary' not in locals() and 'leak_canary' in globals():"))
+        insertions.append((line_count + 1, "    canary = leak_canary()"))
+    else:
+        return script
+
+    for idx, text in sorted(insertions, key=lambda x: x[0], reverse=True):
+        safe_idx = max(0, min(len(lines), idx))
+        lines.insert(safe_idx, text)
+
+    patched = "\n".join(lines)
     try:
         ast.parse(patched)
         return patched
     except Exception:
+        # Never emit a broken exploit script into the loop.
+        try:
+            ast.parse(script)
+        except Exception:
+            return script
         return script
 
 
@@ -161,6 +179,7 @@ def autonomous_exploit_loop(initial_script: str, rounds: int = 5, timeout_s: int
         history.append(step)
         if success:
             sig = str(analysis.get("signature", "unknown"))
+            transforms = analysis.get("recommended_transforms", [])
             if sig:
                 existing = patch_mem.get(sig, [])
                 if transforms:
@@ -172,9 +191,15 @@ def autonomous_exploit_loop(initial_script: str, rounds: int = 5, timeout_s: int
         if not transforms and sig in patch_mem:
             transforms = patch_mem.get(sig, [])
         if transforms:
-            for t in transforms:
-                script = _ast_patch(script, t)
+            prior_script = script
             script = refine_script_with_transforms(script, transforms)
+            # Re-run immediately so transforms have real effect in the same reflection round.
+            if script != prior_script:
+                rc2, out2 = _execute_python(script, timeout_s=timeout_s)
+                step["post_patch_return_code"] = int(rc2)
+                step["post_patch_output_excerpt"] = str(out2)[:1200]
+                if (rc2 == 0) and ("flag{" in out2.lower() or "ctf{" in out2.lower() or "picoctf{" in out2.lower()):
+                    return {"status": "solved", "history": history, "final_script": script, "output_excerpt": out2[:2000]}
         else:
             script = refine_script(script, analysis.get("signature", "unknown"))
     return {"status": "exhausted", "history": history, "final_script": script}

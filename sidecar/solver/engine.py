@@ -1285,6 +1285,7 @@ def _run_solve_impl(payload):
     _DifficultyEstimator = None
     _rag_ingest_solved = None
     _score_tool_novelty = None
+    _ToolDeduplicator = None
     _synthesize_branch_progress = None
     _record_chain_edge = None
     _fetch_live_writeup_hint = None
@@ -1374,6 +1375,10 @@ def _run_solve_impl(payload):
         from solver.novelty_gate import score_tool_novelty as _score_tool_novelty
     except Exception:
         _score_tool_novelty = None
+    try:
+        from solver.tool_deduplicator import ToolDeduplicator as _ToolDeduplicator
+    except Exception:
+        _ToolDeduplicator = None
     try:
         from solver.branch_synthesis import synthesize_branch_progress as _synthesize_branch_progress
     except Exception:
@@ -1755,10 +1760,14 @@ def _run_solve_impl(payload):
     debate_context = ""
     novelty_min_score = float(extra.get("noveltyGateMinScore", 0.2))
     novelty_gate_enabled = bool(extra.get("haikuNoveltyGate", True))
+    dedup_enabled = bool(extra.get("toolDedupEnabled", True))
+    dedup_similarity = float(extra.get("toolDedupSimilarity", 0.70))
+    tool_deduplicator = _ToolDeduplicator(similarity_threshold=dedup_similarity) if (_ToolDeduplicator and dedup_enabled) else None
     last_chain_tool = ""
     last_chain_output = ""
     last_iter_tool_set = set()
     no_novel_thinking_streak = 0
+    critic_hard_block_until_iter = 0
     live_hint_last_iter = 0
     live_hint_cooldown = int(extra.get("liveHintCooldownIters", 3))
 
@@ -1841,10 +1850,12 @@ def _run_solve_impl(payload):
                     "tool_failures": tool_failures,
                     "strategy_mode": strategy_history[-1].get("mode", "") if strategy_history else "",
                     "solved": status == "solved",
+                    "failed": status != "solved",
                     "has_flag": bool(solved_flag),
                     "predicted_difficulty": challenge.get("difficulty", "medium"),
                     "actual_iterations": iteration,
                     "max_iterations": max_iterations,
+                    "tool_sequence": tool_call_history[-60:],
                 })
             except Exception:
                 pass
@@ -2469,6 +2480,32 @@ def _run_solve_impl(payload):
             elif btype == "tool_use":
                 has_tool    = True
                 tname,tinput,tid = block.name,block.input,block.id
+                if int(critic_hard_block_until_iter) >= int(iteration) and tname not in ("pre_solve_recon", "rank_hypotheses", "fetch_live_writeup_hint"):
+                    emit("critic_hard_block", iteration=iteration, blocked_tool=tname, until_iter=critic_hard_block_until_iter)
+                    tool_results.append({"type": "tool_result", "tool_use_id": tid, "content": "Tool blocked by critic hard-stop. Pivot required before further exploit actions."})
+                    continue
+
+                if tool_deduplicator and tname not in ("submit_flag", "detect_flag_format"):
+                    try:
+                        dedup = tool_deduplicator.register_or_block(
+                            tool_name=tname,
+                            tool_args=tinput if isinstance(tinput, dict) else {},
+                            recommended_tools=list(strategy.get("recommended_tools", [])),
+                        )
+                        emit("tool_dedup", iteration=iteration, tool=tname, blocked=bool(dedup.get("blocked", False)), similarity=dedup.get("similarity", 0.0), hash=dedup.get("hash", ""))
+                        if bool(dedup.get("blocked", False)):
+                            alt_tool = str(dedup.get("diversify_tool", "")).strip() or str((strategy.get("recommended_tools") or ["pre_solve_recon"])[0])
+                            alt_input = dedup.get("diversify_args", {}) if isinstance(dedup.get("diversify_args", {}), dict) else {}
+                            if alt_tool in TOOL_MAP and alt_tool != tname:
+                                emit("tool_dedup_substitute", iteration=iteration, blocked_tool=tname, substitute_tool=alt_tool, similarity=dedup.get("similarity", 0.0))
+                                tname = alt_tool
+                                tinput = alt_input
+                            else:
+                                tool_results.append({"type": "tool_result", "tool_use_id": tid, "content": f"Blocked redundant tool call: {tname}"})
+                                continue
+                    except Exception:
+                        pass
+
                 tool_call_history.append(tname)
                 preview = json.dumps(tinput)
                 log("sys",f"→ {tname}({preview[:160]+'...' if len(preview)>160 else preview})","dim")
@@ -2724,6 +2761,14 @@ def _run_solve_impl(payload):
                         f"Ignored evidence: {critic_verdict.get('ignored_evidence', [])}\n"
                         "Change approach now and run a disconfirming test."
                     })
+                if bool(critic_verdict.get("flag_hallucination", False)) and bool(critic_verdict.get("recommended_pivot", False)):
+                    critic_hard_block_until_iter = max(int(critic_hard_block_until_iter), int(iteration + 1))
+                    emit("critic_hard_block", iteration=iteration, until_iter=critic_hard_block_until_iter, reason="flag_hallucination_and_pivot")
+                    messages.append({"role": "user", "content":
+                        "[CRITIC HARD BLOCK]\n"
+                        "Flag hallucination risk detected with mandatory pivot.\n"
+                        "Do not run another exploit submission path until a fresh recon/disconfirming step succeeds."
+                    })
             except Exception:
                 pass
 
@@ -2901,7 +2946,9 @@ def _run_solve_impl(payload):
                     "tool_failures": tool_failures,
                     "strategy_mode": strategy.get("mode", ""),
                     "solved": False,
+                    "failed": True,
                     "has_flag": False,
+                    "tool_sequence": tool_call_history[-30:],
                 })
             except Exception:
                 pass
