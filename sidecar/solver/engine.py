@@ -74,14 +74,25 @@ def _bootstrap_runtime_context() -> None:
         from core import orchestrator as _core_orchestrator
         globals()["core_orchestrator"] = _core_orchestrator
 
-    try:
-        entry = importlib.import_module("solver")
-        for name, value in vars(entry).items():
-            if name.startswith("__"):
-                continue
-            globals().setdefault(name, value)
-    except Exception:
-        pass
+    candidate_modules = []
+    main_mod = sys.modules.get("__main__")
+    if main_mod is not None:
+        candidate_modules.append(main_mod)
+
+    for mod_name in ("solver", "sidecar.solver"):
+        try:
+            candidate_modules.append(importlib.import_module(mod_name))
+        except Exception:
+            continue
+
+    for entry in candidate_modules:
+        try:
+            for name, value in vars(entry).items():
+                if name.startswith("__"):
+                    continue
+                globals().setdefault(name, value)
+        except Exception:
+            continue
 
     _RUNTIME_BOOTSTRAPPED = True
 
@@ -3782,6 +3793,41 @@ def _run_solve_impl(payload):
 
 def run_solve(payload):
     _bootstrap_runtime_context()
+
+    critical_symbols = [
+        "emit",
+        "log",
+        "result",
+        "IS_WINDOWS",
+        "USE_WSL",
+        "_w2l",
+        "_shell",
+        "_build_challenge_signal_pack",
+        "_init_credit_guard",
+        "build_tool_registry",
+        "enabled_tools",
+        "TOOLS",
+        "TOOL_MAP",
+        "build_system_prompt",
+        "_build_attack_playbook",
+        "_build_multimodal_feature_pack",
+        "_tokenize_simple",
+        "extract_flag",
+        "_store_failure_path",
+        "_retrieve_memory_v2",
+        "_store_memory_v2",
+        "_KG_STORE",
+        "core_routing",
+        "core_verification",
+    ]
+    missing = [name for name in critical_symbols if name not in globals()]
+    if missing:
+        _safe_fail(
+            payload,
+            "Runtime dependency preflight failed. Missing symbols: " + ", ".join(missing),
+        )
+        return
+
     orchestrator = globals().get("core_orchestrator")
     if orchestrator is None:
         try:
