@@ -1,0 +1,20 @@
+{
+  "query": "",
+  "sources": {
+    "writeup_rag": "local writeup embeddings",
+    "knowledge_graph": "ctf-scoped facts",
+    "git_forensics": "repo artifacts",
+    "tool_outputs": "runtime observations"
+  },
+  "trust_scoring": {
+    "confirmed_flag_artifact": 1.0,
+    "repeatable_tool_output": 0.85,
+    "single_observation": 0.55,
+    "heuristic_guess": 0.25
+  },
+  "dedup_rules": [
+    "same IOC/hash/path -> merge",
+    "same endpoint + params -> merge",
+    "contradictory evidence -> keep higher trust score"
+  ]
+}

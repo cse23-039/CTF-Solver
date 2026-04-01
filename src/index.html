@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CTF::SOLVER</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ══ TOPBAR ════════════════════════════════════════════════════════════ -->
+  <div id="topbar">
+    <span id="logo">CTF::SOLVER</span>
+    <span class="top-sep">│</span>
+    <span class="stat-group"><span class="s-label">staged</span> <span class="s-val" id="st-staged">0</span></span>
+    <span class="top-sep">│</span>
+    <span class="stat-group"><span class="s-label">solving</span> <span class="s-val" id="st-solving">0</span></span>
+    <span class="top-sep">│</span>
+    <span class="stat-group"><span class="s-label">solved</span> <span class="s-val" id="st-solved">0</span></span>
+    <span class="top-sep">│</span>
+    <span class="stat-group"><span class="s-label">failed</span> <span class="s-val" id="st-failed">0</span></span>
+    <span class="top-sep">│</span>
+    <span class="stat-group"><span class="s-label">total</span> <span class="s-val" id="st-total">0</span></span>
+    <div id="topbar-right">
+      <span class="kb">N new</span>
+      <span class="kb">S solve</span>
+      <span class="kb">A all</span>
+      <span class="kb">X cancel</span>
+      <span class="kb">Del remove</span>
+      <button class="btn-icon" id="btn-settings">⚙ settings</button>
+    </div>
+  </div>
+
+  <!-- ══ PLATFORM BAR ══════════════════════════════════════════════════════ -->
+  <div id="platform-bar">
+    <span class="pb-label">CTF</span><span class="pb-sep">│</span>
+    <span class="pb-val" id="pb-ctf-name">not set</span>
+    <span class="pb-sep">│</span>
+    <span class="pb-label">platform</span>
+    <span class="pb-val" id="pb-platform">manual</span>
+    <span class="pb-sep">│</span>
+    <span class="pb-label">model</span>
+    <span class="pb-val" id="pb-model">—</span>
+    <span class="pb-sep">│</span>
+    <span class="pb-label">iter</span>
+    <span class="pb-val" id="pb-iter">—</span>
+    <span class="pb-sep">│</span>
+    <span class="pb-label">runtime</span>
+    <span class="pb-val" id="pb-runtime">—</span>
+    <span class="pb-sep">│</span>
+    <span class="pb-label">reasoning</span>
+    <span class="pb-val" id="pb-reasoning" title="Extended thinking level">off</span>
+    <span class="pb-sep">│</span>
+    <span class="pb-label">flag fmt</span>
+    <span class="pb-val" id="pb-flagfmt" title="Auto-detected flag format">—</span>
+    <span class="pb-sep">│</span>
+    <span class="pb-label">workdir</span>
+    <span class="pb-val" id="pb-workdir">not set</span>
+    <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
+      <span id="pb-conn-status"></span>
+      <button class="btn btn-primary" id="btn-connect" onclick="App.openConnectModal()">⚡ CONNECT TO CTF</button>
+      <button class="btn" id="btn-import" onclick="App.importChallenges()" style="display:none">⬇ SYNC CHALLENGES</button>
+      <button class="btn" id="btn-open-folder" onclick="App.openWorkspace()" style="display:none">📁 FOLDER</button>
+      <button class="btn btn-danger" id="btn-disconnect" onclick="App.disconnect()" style="display:none">✕ DISCONNECT</button>
+    </div>
+  </div>
+
+  <!-- ══ MAIN ══════════════════════════════════════════════════════════════ -->
+  <div id="main">
+
+    <!-- Left -->
+    <div id="left-panel">
+      <div class="panel-hdr">
+        <span class="phdr-c">┌─</span>
+        <span class="phdr-t">Challenges</span>
+        <span class="phdr-f">────────────────────────────────────</span>
+      </div>
+      <div id="ch-list"></div>
+      <div id="add-bar">
+        <div class="add-row">
+          <input type="text" id="qa-name" placeholder="Challenge name..."
+                 onkeydown="if(event.key==='Enter')App.quickAdd()">
+          <select id="qa-cat">
+            <option value="Binary Exploitation">pwn</option>
+            <option value="Cryptography">crypto</option>
+            <option value="Forensics">forensics</option>
+            <option value="Web">web</option>
+            <option value="Reverse Engineering">rev</option>
+            <option value="Misc">misc</option>
+            <option value="OSINT">osint</option>
+          </select>
+          <button class="btn btn-primary" onclick="App.quickAdd()">+ADD</button>
+          <button class="btn" onclick="App.openModal()">⚙</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right -->
+    <div id="right-panel">
+      <div id="details-panel">
+        <div class="panel-hdr">
+          <span class="phdr-c">┌─</span>
+          <span class="phdr-t">Details</span>
+          <span class="phdr-f" id="details-fill">────────────────────────────────────────────────────────────────────</span>
+        </div>
+        <div id="details-body">
+          <div class="empty-state">
+            <pre class="empty-art empty-art-3d">
+╔══════════════════════════════════════╗
+║             ROOT RUNNER              ║
+╚══════════════════════════════════════╝
+</pre>
+            <span>select a challenge</span>
+          </div>
+        </div>
+        <div id="detail-actions">
+          <button class="btn btn-primary" onclick="App.solveSelected()">▶ SOLVE</button>
+          <button class="btn"             onclick="App.solveAll()">⚡ ALL</button>
+          <button class="btn"             onclick="App.cancelSolve()">✕ CANCEL</button>
+          <button class="btn"             onclick="App.clearLog()">CLEAR LOG</button>
+          <button class="btn"             id="btn-open-ws" onclick="App.openSelectedWorkspace()" style="display:none">📁 OPEN</button>
+          <button class="btn btn-danger"  onclick="App.removeSelected()">DEL</button>
+        </div>
+      </div>
+
+      <div id="log-panel">
+        <div class="panel-hdr">
+          <span class="phdr-c">┌─</span>
+          <span class="phdr-t">Solver Log</span>
+          <span id="solving-indicator" style="display:none;margin-left:6px;font-size:10px;color:var(--text-mid)">
+            <span class="spin">◌</span> solving...
+          </span>
+          <span class="phdr-f">────────────────────────────────────────────────────────────────</span>
+        </div>
+        <div id="log-body"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ STATUSBAR ══════════════════════════════════════════════════════════ -->
+  <div id="statusbar">
+    <span>key</span><span class="sb-sep">:</span><span class="sb-val" id="sb-key">not set</span>
+    <span class="sb-sep">│</span>
+    <span>python</span><span class="sb-sep">:</span><span class="sb-val" id="sb-python">—</span>
+    <span class="sb-sep">│</span>
+    <span>wsl</span><span class="sb-sep">:</span><span class="sb-val" id="sb-wsl">—</span>
+    <span class="sb-sep">│</span>
+    <span>tools</span><span class="sb-sep">:</span><span class="sb-val" id="sb-tools">all</span>
+    <span class="sb-sep">│</span>
+    <span>selected</span><span class="sb-sep">:</span><span class="sb-val" id="sb-selected">—</span>
+    <span style="margin-left:auto"><span id="sb-cursor"></span></span>
+  </div>
+
+</div><!-- #app -->
+
+<!-- ══ ADD CHALLENGE MODAL ══════════════════════════════════════════════════ -->
+<div id="modal-overlay" onclick="if(event.target===this)App.closeModal()">
+  <div id="modal">
+    <div class="modal-title">[ ADD CHALLENGE ]</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">NAME *</label>
+        <input type="text" class="form-ctrl" id="m-name" placeholder="e.g. Echo Escape 1">
+      </div>
+      <div class="form-group">
+        <label class="form-label">CATEGORY *</label>
+        <select class="form-ctrl" id="m-cat">
+          <option value="Binary Exploitation">Binary Exploitation (pwn)</option>
+          <option value="Cryptography">Cryptography</option>
+          <option value="Forensics">Forensics</option>
+          <option value="Web">Web</option>
+          <option value="Reverse Engineering">Reverse Engineering</option>
+          <option value="Misc">Misc</option>
+          <option value="OSINT">OSINT</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">POINTS</label>
+        <input type="number" class="form-ctrl" id="m-pts" value="100">
+      </div>
+      <div class="form-group">
+        <label class="form-label">DIFFICULTY</label>
+        <select class="form-ctrl" id="m-diff">
+          <option>easy</option><option selected>medium</option>
+          <option>hard</option><option>insane</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">FLAG FORMAT</label>
+        <input type="text" class="form-ctrl" id="m-fmt" placeholder="picoCTF{...}">
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">DESCRIPTION *</label>
+      <textarea class="form-ctrl is-textarea" id="m-desc"
+        placeholder="Paste the full challenge description..."></textarea>
+    </div>
+    <div class="form-group">
+      <label class="form-label">FILES / SOURCE / DATA</label>
+      <textarea class="form-ctrl is-textarea" id="m-files" style="min-height:60px"
+        placeholder="Paste file contents, source code, hex dumps, ciphertext..."></textarea>
+    </div>
+    <div class="form-group">
+      <label class="form-label">INSTANCE / CONNECTION</label>
+      <input type="text" class="form-ctrl" id="m-inst"
+        placeholder="nc ctf.example.com 1337  |  https://challenge.ctf.io">
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="App.closeModal()">CANCEL</button>
+      <button class="btn btn-primary" onclick="App.addFromModal()">+ ADD</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ SETTINGS PANEL (full-screen tabbed) ══════════════════════════════════ -->
+<div id="settings-overlay" onclick="if(event.target===this)App.closeSettings()">
+  <div id="settings-panel">
+
+    <div id="settings-header">
+      <span id="settings-title">[ SETTINGS ]</span>
+      <button class="btn" onclick="App.closeSettings()" style="margin-left:auto">✕ CLOSE</button>
+    </div>
+
+    <!-- Tab strip -->
+    <div id="settings-tabs">
+      <button class="stab active" data-tab="api">⚡ API &amp; ENGINE</button>
+      <button class="stab" data-tab="python">🐍 PYTHON &amp; TOOLS</button>
+      <button class="stab" data-tab="platform">🌐 PLATFORM</button>
+      <button class="stab" data-tab="solver">🤖 SOLVER BEHAVIOUR</button>
+      <button class="stab" data-tab="ui">🖥 UI &amp; DISPLAY</button>
+    </div>
+
+    <!-- Tab content area -->
+    <div id="settings-body">
+
+      <!-- ── Tab: API & Engine ─────────────────────────────────────────── -->
+      <div class="stab-content active" id="tab-api">
+        <div class="settings-notice">
+          <strong>⚠ Claude Pro ≠ API access.</strong>
+          Claude Pro (claude.ai) does not include API usage.
+          Get a separate key at <strong>console.anthropic.com</strong> → API Keys.
+          Sonnet costs ~$0.01–0.05 per challenge solve.
+        </div>
+
+        <div class="sg-title">ANTHROPIC API</div>
+        <div class="form-group">
+          <label class="form-label">API KEY</label>
+          <div class="input-row">
+            <input type="password" class="form-ctrl" id="s-apikey" placeholder="sk-ant-api03-...">
+            <button class="btn" onclick="toggleShow('s-apikey',this)">SHOW</button>
+            <button class="btn" onclick="App.testApiKey()">TEST</button>
+          </div>
+          <div class="hint" id="s-apikey-status">Get yours at console.anthropic.com → API Keys</div>
+        </div>
+
+        <div class="sg-title">MODEL</div>
+        <div class="form-row">
+          <div class="form-group" style="flex:2">
+            <label class="form-label">PRESET</label>
+            <select class="form-ctrl" id="s-model" onchange="syncModelInput()">
+              <option value="claude-opus-4-6">claude-opus-4-6  — most capable, slowest, ~$15/Mtok</option>
+              <option value="claude-sonnet-4-6" selected>claude-sonnet-4-6  — balanced, recommended, ~$3/Mtok</option>
+              <option value="claude-haiku-4-5-20251001">claude-haiku-4-5  — fast, cheapest, basic, ~$0.25/Mtok</option>
+              <option value="custom">custom model string...</option>
+            </select>
+          </div>
+          <div class="form-group" style="flex:1">
+            <label class="form-label">CUSTOM MODEL STRING</label>
+            <input type="text" class="form-ctrl" id="s-model-custom"
+              placeholder="e.g. claude-sonnet-4-6" disabled>
+          </div>
+        </div>
+
+        <div class="sg-title">GENERATION LIMITS</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">MAX ITERATIONS PER CHALLENGE (0 = auto score-guided)</label>
+            <input type="number" class="form-ctrl" id="s-maxiter" value="0" min="0" max="200">
+            <div class="hint">0 = auto: easy→12, medium→25, hard→45, insane→70. Override here to cap the budget.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">MAX TOKENS PER RESPONSE</label>
+            <input type="number" class="form-ctrl" id="s-maxtokens" value="4096" min="256" max="32000" step="256">
+            <div class="hint">Opus + extended thinking uses up to 16k automatically for hard math. Set higher for complex decompile outputs.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">MAX CONCURRENT SOLVES</label>
+            <input type="number" class="form-ctrl" id="s-concurrent" value="1" min="1" max="5">
+            <div class="hint">How many challenges to solve simultaneously (1 = sequential).</div>
+          </div>
+        </div>
+
+        <div class="sg-title">AUTOMATION &amp; MULTI-MODEL ROUTING</div>
+        <div class="toggles-grid">
+          <label class="toggle-row">
+            <input type="checkbox" id="s-parallel-branches" checked>
+            <span class="toggle-label">Parallel hypothesis branches (hard/insane)</span>
+            <span class="toggle-hint">Launches 2-3 concurrent attack branches simultaneously — whichever finds the flag wins</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="s-auto-submit" checked>
+            <span class="toggle-label">Auto-submit flag to platform</span>
+            <span class="toggle-hint">Automatically call submit_flag when a flag is found</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="s-auto-writeup" checked>
+            <span class="toggle-label">Auto-generate writeup</span>
+            <span class="toggle-hint">Save WRITEUP.md after every successful solve</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="s-auto-workspace" checked>
+            <span class="toggle-label">Auto-create workspace</span>
+            <span class="toggle-hint">Create challenge folder at solve start (requires working directory)</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="s-retry-failed">
+            <span class="toggle-label">Retry failed challenges in Solve All</span>
+            <span class="toggle-hint">Re-attempt challenges marked as failed</span>
+          </label>
+        </div>
+        <div class="settings-notice" style="margin-top:10px">
+          <strong>Multi-model routing (automatic):</strong><br>
+          claude-opus-4-6 + extended thinking → hard crypto/rev challenges (first half of iterations)<br>
+          claude-sonnet-4-6 → all other challenges and phases<br>
+          claude-haiku-4-5 → hypothesis ranking, critic analysis (internal, fast &amp; cheap)<br>
+          Override: set a specific model above to force all iterations to use that model.
+        </div>
+        <div class="form-group" style="margin-top:12px">
+          <label class="form-label">MAX RETRIES (for failed challenges)</label>
+          <input type="number" class="form-ctrl" id="s-maxretry" value="2" min="1" max="10" style="width:120px">
+        </div>
+      </div>
+
+      <!-- ── Tab: Python & Tools ──────────────────────────────────────── -->
+      <div class="stab-content" id="tab-python">
+        <div class="sg-title">PYTHON ENVIRONMENT</div>
+        <div class="form-group">
+          <label class="form-label">PYTHON EXECUTABLE PATH</label>
+          <div class="input-row">
+            <input type="text" class="form-ctrl" id="s-python" placeholder="python3">
+            <button class="btn" onclick="App.checkPython()">CHECK</button>
+            <button class="btn" onclick="App.detectPython()">AUTO-DETECT</button>
+          </div>
+          <div class="hint" id="s-python-status">Common: python3, python, C:\Python314\python.exe, or wsl python3</div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">SOLVER SCRIPT PATH  (absolute path to sidecar/solver.py)</label>
+          <div class="input-row">
+            <input type="text" class="form-ctrl" id="s-solver"
+              placeholder="C:\ctf-solver\sidecar\solver.py">
+            <button class="btn" onclick="App.autoDetectSolver()">AUTO-DETECT</button>
+          </div>
+          <div class="hint" id="s-solver-status"></div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">WSL DISTRO NAME  (Windows only — leave blank for default)</label>
+          <input type="text" class="form-ctrl" id="s-wsl-distro"
+            placeholder="Ubuntu  (blank = use default WSL distro)">
+        </div>
+
+        <div class="sg-title">TOOL TIMEOUTS</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">SHELL COMMAND TIMEOUT (seconds)</label>
+            <input type="number" class="form-ctrl" id="s-shell-timeout" value="30" min="5" max="300">
+            <div class="hint">Applies to execute_shell tool. Increase for long operations (hashcat, gdb).</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">HTTP REQUEST TIMEOUT (seconds)</label>
+            <input type="number" class="form-ctrl" id="s-http-timeout" value="20" min="5" max="120">
+          </div>
+          <div class="form-group">
+            <label class="form-label">FILE DOWNLOAD TIMEOUT (seconds)</label>
+            <input type="number" class="form-ctrl" id="s-dl-timeout" value="60" min="10" max="600">
+          </div>
+        </div>
+
+        <div class="sg-title">ENABLED TOOLS</div>
+        <div class="hint" style="margin-bottom:8px">Disable tools to restrict what Claude can do during solving.</div>
+        <div class="toggles-grid">
+          <label class="toggle-row"><input type="checkbox" id="t-shell" checked>
+            <span class="toggle-label">execute_shell</span>
+            <span class="toggle-hint">Run shell commands (via WSL on Windows)</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-python" checked>
+            <span class="toggle-label">execute_python</span>
+            <span class="toggle-hint">Run Python code snippets</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-decode" checked>
+            <span class="toggle-label">decode_transform</span>
+            <span class="toggle-hint">Base64, hex, rot13, XOR, Caesar, etc.</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-http" checked>
+            <span class="toggle-label">http_request</span>
+            <span class="toggle-hint">Make HTTP/HTTPS requests</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-file" checked>
+            <span class="toggle-label">analyze_file</span>
+            <span class="toggle-hint">Inspect local files (strings, hexdump, entropy)</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-workspace" checked>
+            <span class="toggle-label">create_workspace</span>
+            <span class="toggle-hint">Create challenge folder structure</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-writefile" checked>
+            <span class="toggle-label">write_file</span>
+            <span class="toggle-hint">Save files to disk (scripts, writeups)</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-download" checked>
+            <span class="toggle-label">download_file</span>
+            <span class="toggle-hint">Download challenge attachments</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-submit" checked>
+            <span class="toggle-label">submit_flag</span>
+            <span class="toggle-hint">Submit flags to CTF platform</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-flagformat" checked>
+            <span class="toggle-label">detect_flag_format</span>
+            <span class="toggle-hint">Auto-detect flag format from 50+ CTF database + session cache</span></label>
+        </div>
+        <div class="sg-title" style="margin-top:10px">ELITE INTELLIGENCE TOOLS</div>
+        <div class="hint" style="margin-bottom:8px">New APT-grade capabilities. Disable any that are not installed.</div>
+        <div class="toggles-grid">
+          <label class="toggle-row"><input type="checkbox" id="t-knowledge" checked>
+            <span class="toggle-label">knowledge_store / knowledge_get</span>
+            <span class="toggle-hint">Cross-challenge knowledge graph — shares creds/tech across challenges</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-browser" checked>
+            <span class="toggle-label">browser_agent</span>
+            <span class="toggle-hint">Playwright headless browser (requires: pip install playwright)</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-ghidra" checked>
+            <span class="toggle-label">ghidra_decompile</span>
+            <span class="toggle-hint">Ghidra headless decompiler (falls back to r2 if not installed)</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-airename" checked>
+            <span class="toggle-label">ai_rename_functions</span>
+            <span class="toggle-hint">Claude-powered sub_XXXX → semantic function renaming</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-libclookup" checked>
+            <span class="toggle-label">libc_lookup</span>
+            <span class="toggle-hint">libc.rip API for automatic libc version matching from leaked address</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-factordb" checked>
+            <span class="toggle-label">factordb</span>
+            <span class="toggle-hint">FactorDB.com — look up RSA n factorization (community database)</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-angr" checked>
+            <span class="toggle-label">angr_solve</span>
+            <span class="toggle-hint">Symbolic execution for automatic input synthesis (requires: pip install angr)</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-sqlmap" checked>
+            <span class="toggle-label">sqlmap</span>
+            <span class="toggle-hint">Automatic SQL injection exploitation (requires: pip install sqlmap)</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-ffuf" checked>
+            <span class="toggle-label">ffuf</span>
+            <span class="toggle-hint">Directory/parameter fuzzer (requires: ffuf or gobuster in PATH)</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-webcrawl" checked>
+            <span class="toggle-label">web_crawl</span>
+            <span class="toggle-hint">Burp-style spider for black-box web recon</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-volatility" checked>
+            <span class="toggle-label">volatility</span>
+            <span class="toggle-hint">Volatility 3 memory forensics (requires: pip install volatility3)</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-frida" checked>
+            <span class="toggle-label">frida_trace</span>
+            <span class="toggle-hint">Dynamic instrumentation for rev/pwn (requires: pip install frida-tools)</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-rank" checked>
+            <span class="toggle-label">rank_hypotheses</span>
+            <span class="toggle-hint">Claude Haiku scores attack vectors by evidence — prevents dead-end iterations</span></label>
+          <label class="toggle-row"><input type="checkbox" id="t-recon" checked>
+            <span class="toggle-label">pre_solve_recon</span>
+            <span class="toggle-hint">Parallel pre-solve recon (checksec, strings, HTTP headers, etc.)</span></label>
+        </div>
+
+        <div class="sg-title" style="margin-top:12px">LOG VERBOSITY</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">TOOL OUTPUT PREVIEW (chars)</label>
+            <input type="number" class="form-ctrl" id="s-log-preview" value="400" min="100" max="2000">
+            <div class="hint">How many chars of tool output to show in the log (full output still sent to Claude).</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">MAX LOG LINES</label>
+            <input type="number" class="form-ctrl" id="s-log-lines" value="2000" min="100" max="10000">
+            <div class="hint">Old lines are trimmed when this limit is reached.</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">VERBOSITY</label>
+            <select class="form-ctrl" id="s-verbosity">
+              <option value="verbose">verbose — show everything</option>
+              <option value="normal" selected>normal — hide dim lines</option>
+              <option value="minimal">minimal — only important events</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Tab: Platform ────────────────────────────────────────────── -->
+      <div class="stab-content" id="tab-platform">
+        <div class="sg-title">COMPETITION</div>
+        <div class="form-row">
+          <div class="form-group" style="flex:2">
+            <label class="form-label">CTF NAME  (used for folder organisation)</label>
+            <input type="text" class="form-ctrl" id="s-ctfname" placeholder="e.g. PicoCTF 2026">
+          </div>
+          <div class="form-group" style="flex:1">
+            <label class="form-label">PLATFORM TYPE</label>
+            <select class="form-ctrl" id="s-platform" onchange="updatePlatformFields()">
+              <option value="manual">Manual (no platform)</option>
+              <option value="picoctf">picoCTF</option>
+              <option value="ctfd">CTFd (most competitions)</option>
+              <option value="htb">HackTheBox</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="platform-fields">
+          <div class="form-group" id="pf-url-group">
+            <label class="form-label">CTF SITE URL</label>
+            <input type="text" class="form-ctrl" id="s-ctfurl" placeholder="https://ctf.example.com">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">USERNAME / EMAIL</label>
+              <input type="text" class="form-ctrl" id="s-ctfuser" placeholder="your username">
+            </div>
+            <div class="form-group">
+              <label class="form-label">PASSWORD</label>
+              <div class="input-row">
+                <input type="password" class="form-ctrl" id="s-ctfpass" placeholder="your password">
+                <button class="btn" onclick="toggleShow('s-ctfpass',this)">SHOW</button>
+              </div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">API TOKEN  (use instead of password if available)</label>
+            <div class="input-row">
+              <input type="password" class="form-ctrl" id="s-ctftoken" placeholder="platform API token">
+              <button class="btn" onclick="toggleShow('s-ctftoken',this)">SHOW</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="sg-title">FILE ORGANISATION</div>
+        <div class="form-group">
+          <label class="form-label">CTF WORKING DIRECTORY</label>
+          <input type="text" class="form-ctrl" id="s-basedir"
+            placeholder="C:\CTFs  or  /home/user/ctfs  or  ~/ctfs">
+          <div class="hint">Challenges saved as: WorkDir / CTF Name / Category / Challenge Name / files/</div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">WRITEUP FILENAME</label>
+            <input type="text" class="form-ctrl" id="s-writeup-name" value="WRITEUP.md">
+          </div>
+          <div class="form-group">
+            <label class="form-label">NOTES FILENAME</label>
+            <input type="text" class="form-ctrl" id="s-notes-name" value="notes.txt">
+          </div>
+        </div>
+
+        <div class="sg-title">FLAG FORMATS</div>
+        <div class="form-group">
+          <label class="form-label">CUSTOM FLAG PATTERNS  (one regex per line, added on top of built-in patterns)</label>
+          <textarea class="form-ctrl is-textarea" id="s-flag-patterns" style="min-height:80px"
+            placeholder="e.g.\nmyctf\{[^}]+\}\nSECRET-[A-Z0-9]{16}"></textarea>
+          <div class="hint">Built-in: picoCTF{}, flag{}, CTF{}, HTB{}, DUCTF{}, thm{}, corctf{}, uiuctf{}</div>
+        </div>
+      </div>
+
+      <!-- ── Tab: Solver Behaviour ─────────────────────────────────────── -->
+      <div class="stab-content" id="tab-solver">
+        <div class="sg-title">SYSTEM PROMPT</div>
+        <div class="form-group">
+          <div class="input-row" style="margin-bottom:6px">
+            <label class="form-label" style="margin:0">CUSTOM SYSTEM PROMPT  (overrides the default if set)</label>
+            <button class="btn" onclick="App.resetSystemPrompt()" style="margin-left:auto">RESET TO DEFAULT</button>
+          </div>
+          <textarea class="form-ctrl is-textarea" id="s-system-prompt" style="min-height:160px;font-size:10.5px"
+            placeholder="Leave blank to use the built-in solver prompt. Or override entirely here — useful for custom competition strategies, restricted tool use, specific flag formats, or different personas."></textarea>
+          <div class="hint">Tip: Include {ctf_name}, {category}, {os_info} — these are auto-filled at solve time.</div>
+        </div>
+
+        <div class="sg-title">SOLVER STRATEGY</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">INITIAL ANALYSIS DEPTH</label>
+            <select class="form-ctrl" id="s-analysis-depth">
+              <option value="quick">quick — dive straight into exploitation</option>
+              <option value="thorough" selected>thorough — analyse first, then exploit</option>
+              <option value="exhaustive">exhaustive — try everything before giving up</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">PIVOT STRATEGY</label>
+            <select class="form-ctrl" id="s-pivot">
+              <option value="auto" selected>auto — Claude decides when to pivot</option>
+              <option value="aggressive">aggressive — pivot after 2 failed attempts</option>
+              <option value="persistent">persistent — exhaust approach before pivoting</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="sg-title">WRITEUP STYLE</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">WRITEUP DETAIL LEVEL</label>
+            <select class="form-ctrl" id="s-writeup-detail">
+              <option value="brief">brief — flag + one-liner</option>
+              <option value="normal" selected>normal — step-by-step with code</option>
+              <option value="detailed">detailed — full walkthrough + explanation</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">WRITEUP STYLE</label>
+            <select class="form-ctrl" id="s-writeup-style">
+              <option value="technical" selected>technical — commands and code focused</option>
+              <option value="educational">educational — explain concepts for learners</option>
+              <option value="minimal">minimal — flag and tools only</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="sg-title">CUSTOM INSTRUCTIONS (appended to every solve prompt)</div>
+        <div class="form-group">
+          <textarea class="form-ctrl is-textarea" id="s-extra-instructions" style="min-height:80px"
+            placeholder="e.g. Always try ROT13 first on crypto challenges. For web, check robots.txt and /admin. Prefer pwntools for binary exploitation."></textarea>
+        </div>
+
+        <div class="sg-title">CHALLENGE CATEGORIES — PER-CATEGORY HINTS</div>
+        <div class="form-group">
+          <label class="form-label">BINARY EXPLOITATION HINTS</label>
+          <input type="text" class="form-ctrl" id="s-hint-pwn"
+            placeholder="e.g. Check for buffer overflow first. Use checksec. Try ret2win.">
+        </div>
+        <div class="form-group">
+          <label class="form-label">CRYPTOGRAPHY HINTS</label>
+          <input type="text" class="form-ctrl" id="s-hint-crypto"
+            placeholder="e.g. Check for RSA with small e. Try frequency analysis on substitution ciphers.">
+        </div>
+        <div class="form-group">
+          <label class="form-label">WEB HINTS</label>
+          <input type="text" class="form-ctrl" id="s-hint-web"
+            placeholder="e.g. Check source code, cookies, headers. Try SQL injection in all inputs.">
+        </div>
+        <div class="form-group">
+          <label class="form-label">FORENSICS HINTS</label>
+          <input type="text" class="form-ctrl" id="s-hint-forensics"
+            placeholder="e.g. Check file magic bytes. Try steghide with empty password. Look at metadata.">
+        </div>
+      </div>
+
+      <!-- ── Tab: UI & Display ─────────────────────────────────────────── -->
+      <div class="stab-content" id="tab-ui">
+        <div class="sg-title">LAYOUT</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">LEFT PANEL WIDTH (px)</label>
+            <input type="number" class="form-ctrl" id="s-panel-width" value="360" min="200" max="600" onchange="App.applyUISettings()">
+          </div>
+          <div class="form-group">
+            <label class="form-label">SPLIT RATIO  (details : log)</label>
+            <select class="form-ctrl" id="s-split" onchange="App.applyUISettings()">
+              <option value="1fr 1fr" selected>50 / 50 (default)</option>
+              <option value="2fr 1fr">67 / 33 (more details)</option>
+              <option value="1fr 2fr">33 / 67 (more log)</option>
+              <option value="3fr 1fr">75 / 25</option>
+              <option value="1fr 3fr">25 / 75</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="sg-title">TYPOGRAPHY</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">FONT SIZE (px)</label>
+            <input type="number" class="form-ctrl" id="s-font-size" value="12" min="9" max="18" onchange="App.applyUISettings()">
+          </div>
+          <div class="form-group">
+            <label class="form-label">LINE HEIGHT</label>
+            <input type="number" class="form-ctrl" id="s-line-height" value="1.6" min="1.2" max="2.4" step="0.1" onchange="App.applyUISettings()">
+          </div>
+          <div class="form-group">
+            <label class="form-label">FONT FAMILY</label>
+            <select class="form-ctrl" id="s-font" onchange="App.applyUISettings()">
+              <option value="'JetBrains Mono', monospace" selected>JetBrains Mono</option>
+              <option value="'Fira Code', monospace">Fira Code</option>
+              <option value="'Cascadia Code', monospace">Cascadia Code</option>
+              <option value="'Courier New', monospace">Courier New</option>
+              <option value="Consolas, monospace">Consolas</option>
+              <option value="monospace">System Monospace</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="sg-title">COLOURS</div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">BACKGROUND</label>
+            <div class="input-row">
+              <input type="color" id="s-col-bg" value="#121722" onchange="App.applyUISettings()">
+              <input type="text" class="form-ctrl" id="s-col-bg-hex" value="#121722"
+                oninput="syncColor('s-col-bg','s-col-bg-hex',false)" style="width:100px">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">ACCENT / HIGHLIGHT</label>
+            <div class="input-row">
+              <input type="color" id="s-col-accent" value="#8ab4ff" onchange="App.applyUISettings()">
+              <input type="text" class="form-ctrl" id="s-col-accent-hex" value="#8ab4ff"
+                oninput="syncColor('s-col-accent','s-col-accent-hex',false)" style="width:100px">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">BORDER COLOUR</label>
+            <div class="input-row">
+              <input type="color" id="s-col-border" value="#3c4b6b" onchange="App.applyUISettings()">
+              <input type="text" class="form-ctrl" id="s-col-border-hex" value="#3c4b6b"
+                oninput="syncColor('s-col-border','s-col-border-hex',false)" style="width:100px">
+            </div>
+          </div>
+        </div>
+        <div class="form-group">
+          <button class="btn" onclick="App.resetColors()">RESET COLOURS TO DEFAULT</button>
+        </div>
+
+        <div class="sg-title">DISPLAY OPTIONS</div>
+        <div class="toggles-grid">
+          <label class="toggle-row">
+            <input type="checkbox" id="s-show-kb" checked onchange="App.applyUISettings()">
+            <span class="toggle-label">Show keyboard hints in topbar</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="s-scanlines" checked onchange="App.applyUISettings()">
+            <span class="toggle-label">CRT scanline effect</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="s-blink-cursor" checked onchange="App.applyUISettings()">
+            <span class="toggle-label">Blinking cursor in statusbar</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="s-log-timestamps" checked>
+            <span class="toggle-label">Show timestamps in log</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="s-animate-log" checked>
+            <span class="toggle-label">Animate log entries (fade in)</span>
+          </label>
+        </div>
+
+        <div class="sg-title" style="margin-top:12px">PREVIEW</div>
+        <div id="ui-preview">
+          <span style="color:var(--text-pure)">CTF::SOLVER</span>
+          <span style="color:var(--text-mid)"> │ staged </span>
+          <span style="color:var(--text-bright)">3</span>
+          <span style="color:var(--text-mid)"> │ solved </span>
+          <span style="color:var(--text-bright)">1</span>
+          <span style="color:var(--text-dim)"> │ The font and colours above apply live.</span>
+        </div>
+      </div>
+
+    </div><!-- #settings-body -->
+
+    <div id="settings-footer">
+      <button class="btn" onclick="App.exportSettings()">⬇ EXPORT SETTINGS</button>
+      <button class="btn" onclick="App.importSettingsFile()">⬆ IMPORT SETTINGS</button>
+      <input type="file" id="settings-file-input" accept=".json" style="display:none"
+             onchange="App.loadSettingsFile(this)">
+      <button class="btn btn-danger" onclick="App.resetAllSettings()">RESET ALL DEFAULTS</button>
+      <button class="btn btn-primary" onclick="App.saveSettings()" style="margin-left:auto">
+        ✓ SAVE &amp; APPLY
+      </button>
+    </div>
+
+  </div><!-- #settings-panel -->
+</div>
+
+<!-- ══ CONNECT TO CTF MODAL ══════════════════════════════════════════════════ -->
+<div id="connect-overlay" onclick="if(event.target===this)App.closeConnectModal()">
+  <div id="connect-modal">
+
+    <div class="modal-title" style="display:flex;align-items:center;gap:10px">
+      <span>[ CONNECT TO CTF ]</span>
+      <span id="conn-detected-badge" style="display:none"></span>
+    </div>
+
+    <!-- Step 1: URL -->
+    <div class="conn-step" id="conn-step-url">
+      <div class="conn-step-label">STEP 1 — CTF URL</div>
+      <div class="form-group">
+        <label class="form-label">CTF SITE URL</label>
+        <div class="input-row">
+          <input type="text" class="form-ctrl" id="conn-url"
+            placeholder="https://play.picoctf.org  or  https://ctf.example.com  or  https://www.hackthebox.com"
+            oninput="App.detectPlatformFromUrl(this.value)"
+            onkeydown="if(event.key==='Enter')App.connectStep2()">
+          <button class="btn" onclick="App.connectStep2()">NEXT →</button>
+        </div>
+        <div class="hint" id="conn-url-hint">Paste the CTF site URL — platform auto-detected</div>
+      </div>
+
+      <div id="conn-platform-cards" class="platform-cards">
+        <div class="platform-card" id="pc-picoctf" onclick="App.selectPlatform('picoctf','https://play.picoctf.org')">
+          <span class="pc-name">picoCTF</span>
+          <span class="pc-url">play.picoctf.org</span>
+        </div>
+        <div class="platform-card" id="pc-ctfd" onclick="App.selectPlatform('ctfd','')">
+          <span class="pc-name">CTFd</span>
+          <span class="pc-url">most competitions</span>
+        </div>
+        <div class="platform-card" id="pc-htb" onclick="App.selectPlatform('htb','https://www.hackthebox.com')">
+          <span class="pc-name">HackTheBox</span>
+          <span class="pc-url">hackthebox.com</span>
+        </div>
+        <div class="platform-card" id="pc-manual" onclick="App.selectPlatform('manual','')">
+          <span class="pc-name">Manual</span>
+          <span class="pc-url">no platform</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 2: Credentials -->
+    <div class="conn-step" id="conn-step-creds" style="display:none">
+      <div class="conn-step-label">STEP 2 — CREDENTIALS</div>
+
+      <div id="conn-creds-picoctf">
+        <div class="form-group">
+          <label class="form-label">USERNAME</label>
+          <input type="text" class="form-ctrl conn-cred" id="conn-user" placeholder="your picoCTF username" autocomplete="username">
+        </div>
+        <div class="form-group">
+          <label class="form-label">PASSWORD</label>
+          <div class="input-row">
+            <input type="password" class="form-ctrl conn-cred" id="conn-pass" placeholder="your password" autocomplete="current-password">
+            <button class="btn" onclick="toggleShow('conn-pass',this)">SHOW</button>
+          </div>
+        </div>
+        <div class="conn-or">── or use token instead ──</div>
+        <div class="form-group">
+          <label class="form-label">API TOKEN  (optional — replaces username/password)</label>
+          <div class="input-row">
+            <input type="password" class="form-ctrl conn-cred" id="conn-token" placeholder="API token if available">
+            <button class="btn" onclick="toggleShow('conn-token',this)">SHOW</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="conn-creds-htb" style="display:none">
+        <div class="settings-notice">
+          HackTheBox requires an API token.<br>
+          Go to <strong>hackthebox.com → Profile → API Key</strong> to generate one.
+        </div>
+        <div class="form-group">
+          <label class="form-label">HTB API TOKEN</label>
+          <div class="input-row">
+            <input type="password" class="form-ctrl conn-cred" id="conn-htb-token" placeholder="your HTB API token">
+            <button class="btn" onclick="toggleShow('conn-htb-token',this)">SHOW</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="conn-creds-manual" style="display:none">
+        <div class="settings-notice">
+          Manual mode — no platform connection.<br>
+          You can still add challenges manually and use the autonomous solver.<br>
+          Challenge files and flags won't be auto-submitted.
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 3: CTF details -->
+    <div class="conn-step" id="conn-step-details" style="display:none">
+      <div class="conn-step-label">STEP 3 — COMPETITION DETAILS</div>
+      <div class="form-row">
+        <div class="form-group" style="flex:2">
+          <label class="form-label">CTF NAME  (used to name your working folder)</label>
+          <input type="text" class="form-ctrl" id="conn-ctf-name" placeholder="e.g. PicoCTF 2026">
+        </div>
+        <div class="form-group" style="flex:1">
+          <label class="form-label">YEAR</label>
+          <input type="number" class="form-ctrl" id="conn-year" placeholder="2026">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">WORKING DIRECTORY  (where challenge folders will be created)</label>
+        <input type="text" class="form-ctrl" id="conn-basedir"
+          placeholder="C:\CTFs  or  /home/kagiso/ctfs  or  ~/ctfs">
+        <div class="hint">Structure: WorkDir / CTF Name / Category / Challenge Name / files/</div>
+      </div>
+    </div>
+
+    <!-- Connection log -->
+    <div id="conn-log" style="display:none">
+      <div class="conn-step-label">CONNECTION LOG</div>
+      <div id="conn-log-body"></div>
+    </div>
+
+    <!-- Status -->
+    <div id="conn-status-bar">
+      <div id="conn-progress" style="display:none">
+        <span class="spin">◌</span>
+        <span id="conn-progress-msg">Connecting...</span>
+      </div>
+      <div id="conn-error" style="display:none;color:var(--text-mid)"></div>
+    </div>
+
+    <!-- Actions -->
+    <div class="modal-actions" id="conn-actions">
+      <button class="btn" onclick="App.closeConnectModal()">CANCEL</button>
+      <button class="btn" id="conn-btn-back" onclick="App.connectBack()" style="display:none">← BACK</button>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn" id="conn-btn-next" onclick="App.connectStep2()">NEXT →</button>
+        <button class="btn btn-primary" id="conn-btn-connect" onclick="App.connectAndImport()" style="display:none">⚡ CONNECT &amp; IMPORT</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="main.js"></script>
+</body>
+</html>

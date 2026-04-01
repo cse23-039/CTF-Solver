@@ -1,0 +1,51 @@
+{
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "devPath": "../src",
+    "distDir": "../src",
+    "withGlobalTauri": true
+  },
+  "package": {
+    "productName": "CTF Solver",
+    "version": "1.0.0"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": false,
+      "shell": {
+        "open": true
+      },
+      "window": {
+        "close": true,
+        "minimize": true,
+        "maximize": true,
+        "setTitle": true
+      }
+    },
+    "bundle": {
+      "active": true,
+      "targets": "all",
+      "identifier": "com.ctfsolver.app",
+      "icon": [],
+      "resources": ["../sidecar/solver.py", "../sidecar/requirements.txt"]
+    },
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "title": "CTF::SOLVER",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 1000,
+        "minHeight": 600,
+        "decorations": true,
+        "fullscreen": false,
+        "resizable": true,
+        "center": true,
+        "transparent": false
+      }
+    ]
+  }
+}
