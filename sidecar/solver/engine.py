@@ -22,6 +22,49 @@ _MODEL_HAIKU = "claude-haiku-4-5-20251001"
 _RUNTIME_BOOTSTRAPPED = False
 
 
+def _safe_fail(payload: dict | None, message: str) -> None:
+    msg = str(message or "Unknown solver runtime error")
+    try:
+        logger = globals().get("log")
+        if callable(logger):
+            logger("err", msg, "red")
+        else:
+            print(json.dumps({"type": "error", "message": msg}, ensure_ascii=False), flush=True)
+    except Exception:
+        try:
+            print(json.dumps({"type": "error", "message": msg}, ensure_ascii=False), flush=True)
+        except Exception:
+            pass
+
+    workspace = ""
+    if isinstance(payload, dict):
+        workspace = str(payload.get("base_dir", "") or "")
+
+    try:
+        result_fn = globals().get("result")
+        if callable(result_fn):
+            result_fn("failed", workspace=workspace)
+        else:
+            print(
+                json.dumps(
+                    {"type": "result", "status": "failed", "flag": None, "reason": msg, "workspace": workspace},
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+    except Exception:
+        try:
+            print(
+                json.dumps(
+                    {"type": "result", "status": "failed", "flag": None, "reason": msg, "workspace": workspace},
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+        except Exception:
+            pass
+
+
 def _bootstrap_runtime_context() -> None:
     global _RUNTIME_BOOTSTRAPPED
     if _RUNTIME_BOOTSTRAPPED:
@@ -3745,14 +3788,12 @@ def run_solve(payload):
             from core import orchestrator as orchestrator  # type: ignore
             globals()["core_orchestrator"] = orchestrator
         except Exception as e:
-            log("err", f"Runtime init failed: cannot load core orchestrator ({e})", "red")
-            result("failed", workspace=(payload or {}).get("base_dir", ""))
+            _safe_fail(payload, f"Runtime init failed: cannot load core orchestrator ({e})")
             return
 
     try:
         return orchestrator.run_solve(payload, _run_solve_impl)
     except Exception as e:
-        log("err", f"Solve pipeline crashed: {e}", "red")
-        result("failed", workspace=(payload or {}).get("base_dir", ""))
+        _safe_fail(payload, f"Solve pipeline crashed: {e}")
         return
 
