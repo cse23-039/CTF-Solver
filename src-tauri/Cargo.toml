@@ -30,3 +30,6 @@ libc = "0.2"
 [features]
 default     = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[patch.crates-io]
+wry = { git = "https://github.com/tauri-apps/wry" }
