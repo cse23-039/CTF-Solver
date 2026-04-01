@@ -176,6 +176,44 @@ def _bootstrap_runtime_context() -> None:
     except Exception:
         pass
 
+    globals().setdefault("_ctf_knowledge", defaultdict(dict))
+
+    if globals().get("_KG_STORE") is None:
+        class _NoopKnowledgeStore:
+            db_path = ""
+
+            def get_facts(self, _ctf_name):
+                return {}
+
+            def upsert_fact(self, _ctf_name, _key, _value):
+                return None
+
+            def query_context(self, _ctf_name, _query_terms, max_items=8):
+                return []
+
+            def render_cross_ctf_context(self, category="", technique_hint=""):
+                return ""
+
+            def ingest_solve_record(self, _record):
+                return None
+
+        globals()["_KG_STORE"] = _NoopKnowledgeStore()
+
+    if globals().get("emit") is None:
+        def _emit_fallback(t, **kw):
+            print(json.dumps({"type": str(t), **kw}, ensure_ascii=False), flush=True)
+        globals()["emit"] = _emit_fallback
+
+    if globals().get("log") is None:
+        def _log_fallback(tag, msg, cls=""):
+            print(json.dumps({"type": "log", "tag": str(tag), "msg": str(msg), "cls": str(cls)}, ensure_ascii=False), flush=True)
+        globals()["log"] = _log_fallback
+
+    if globals().get("result") is None:
+        def _result_fallback(status, flag=None, workspace=None):
+            print(json.dumps({"type": "result", "status": str(status), "flag": flag, "workspace": workspace}, ensure_ascii=False), flush=True)
+        globals()["result"] = _result_fallback
+
     try:
         from core import routing as _core_routing
         globals().setdefault("core_routing", _core_routing)
