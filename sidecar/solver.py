@@ -228,33 +228,38 @@ def main():
         sys.exit(1)
 
     mode = payload.get("mode", "solve")
-    if mode == "solve":
-        run_solve(payload)
-    elif mode == "benchmark":
-        run_benchmark(payload)
-    elif mode == "import":
-        run_import(payload)
-    elif mode == "offline_eval":
-        dataset_path = str(payload.get("dataset_path", "") or "")
-        benchmark_path = str(payload.get("benchmark_path", "") or "")
-        if not dataset_path or not benchmark_path:
-            emit("error", message="offline_eval requires dataset_path and benchmark_path")
+    try:
+        if mode == "solve":
+            run_solve(payload)
+        elif mode == "benchmark":
+            run_benchmark(payload)
+        elif mode == "import":
+            run_import(payload)
+        elif mode == "offline_eval":
+            dataset_path = str(payload.get("dataset_path", "") or "")
+            benchmark_path = str(payload.get("benchmark_path", "") or "")
+            if not dataset_path or not benchmark_path:
+                emit("error", message="offline_eval requires dataset_path and benchmark_path")
+                sys.exit(1)
+            out = run_offline_eval(dataset_path=dataset_path, benchmark_path=benchmark_path, gates=payload.get("gates", {}))
+            print(json.dumps({"type": "offline_eval", **out}, ensure_ascii=False), flush=True)
+        elif mode == "chaos_audit":
+            out = run_chaos_harness(seed=int(payload.get("seed", 42) or 42), rounds=int(payload.get("rounds", 40) or 40))
+            print(json.dumps({"type": "chaos_harness", **out}, ensure_ascii=False), flush=True)
+        elif mode == "counterfactual":
+            replay_path = str(payload.get("replay_path", "") or "")
+            output_path = str(payload.get("output_path", "") or "")
+            if not replay_path or not output_path:
+                emit("error", message="counterfactual requires replay_path and output_path")
+                sys.exit(1)
+            out = derive_counterfactual_deltas(replay_path=replay_path, output_path=output_path, limit=int(payload.get("limit", 3000) or 3000))
+            print(json.dumps({"type": "counterfactual", **out}, ensure_ascii=False), flush=True)
+        else:
+            emit("error", message=f"Unknown mode: {mode}")
             sys.exit(1)
-        out = run_offline_eval(dataset_path=dataset_path, benchmark_path=benchmark_path, gates=payload.get("gates", {}))
-        print(json.dumps({"type": "offline_eval", **out}, ensure_ascii=False), flush=True)
-    elif mode == "chaos_audit":
-        out = run_chaos_harness(seed=int(payload.get("seed", 42) or 42), rounds=int(payload.get("rounds", 40) or 40))
-        print(json.dumps({"type": "chaos_harness", **out}, ensure_ascii=False), flush=True)
-    elif mode == "counterfactual":
-        replay_path = str(payload.get("replay_path", "") or "")
-        output_path = str(payload.get("output_path", "") or "")
-        if not replay_path or not output_path:
-            emit("error", message="counterfactual requires replay_path and output_path")
-            sys.exit(1)
-        out = derive_counterfactual_deltas(replay_path=replay_path, output_path=output_path, limit=int(payload.get("limit", 3000) or 3000))
-        print(json.dumps({"type": "counterfactual", **out}, ensure_ascii=False), flush=True)
-    else:
-        emit("error", message=f"Unknown mode: {mode}")
+    except Exception as e:
+        emit("error", message=f"Unhandled sidecar error in mode '{mode}': {e}")
+        print(json.dumps({"type": "result", "status": "failed", "flag": None}, ensure_ascii=False), flush=True)
         sys.exit(1)
 
 

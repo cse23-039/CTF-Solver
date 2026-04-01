@@ -1,10 +1,46 @@
 """Core solve loop."""
 from __future__ import annotations
 
+import importlib
+import json
+import os
+import re
+import sys
+import time
+from collections import defaultdict
+
+try:
+    from core import orchestrator as core_orchestrator
+except Exception:
+    core_orchestrator = None
+
 
 _MODEL_OPUS = "claude-opus-4-1-20250805"
 _MODEL_SONNET = "claude-sonnet-4-6"
 _MODEL_HAIKU = "claude-haiku-4-5-20251001"
+
+_RUNTIME_BOOTSTRAPPED = False
+
+
+def _bootstrap_runtime_context() -> None:
+    global _RUNTIME_BOOTSTRAPPED
+    if _RUNTIME_BOOTSTRAPPED:
+        return
+
+    if globals().get("core_orchestrator") is None:
+        from core import orchestrator as _core_orchestrator
+        globals()["core_orchestrator"] = _core_orchestrator
+
+    try:
+        entry = importlib.import_module("solver")
+        for name, value in vars(entry).items():
+            if name.startswith("__"):
+                continue
+            globals().setdefault(name, value)
+    except Exception:
+        pass
+
+    _RUNTIME_BOOTSTRAPPED = True
 
 
 def _kgkey(ctf_name: str) -> str:
@@ -360,6 +396,7 @@ def _run_exploit_dev_automation(category: str, challenge_ctx: dict, workspace: s
 
 
 def run_benchmark(payload: dict):
+    _bootstrap_runtime_context()
     rows = payload.get("results", []) if isinstance(payload.get("results"), list) else []
     total = len(rows)
     if total == 0:
@@ -996,6 +1033,7 @@ def run_parallel_branches(hypotheses: list, challenge_ctx: dict, api_key: str,
 
 
 def run_import(payload):
+    _bootstrap_runtime_context()
     pc=payload.get("platform",{}); base_dir=payload.get("base_dir",""); ctf_name=payload.get("ctf_name","CTF")
     watch = bool(payload.get("watchNewChallenges", False))
     watch_interval = max(5, int(payload.get("watchIntervalSeconds", 30) or 30))
@@ -1213,6 +1251,7 @@ def run_import(payload):
 
 
 def _run_solve_impl(payload):
+    _bootstrap_runtime_context()
     global _PLATFORM_CONFIG, _solve_start_time, _current_model_display
     _solve_start_time = time.time()
 
@@ -3699,5 +3738,21 @@ def _run_solve_impl(payload):
 
 
 def run_solve(payload):
-    return core_orchestrator.run_solve(payload, _run_solve_impl)
+    _bootstrap_runtime_context()
+    orchestrator = globals().get("core_orchestrator")
+    if orchestrator is None:
+        try:
+            from core import orchestrator as orchestrator  # type: ignore
+            globals()["core_orchestrator"] = orchestrator
+        except Exception as e:
+            log("err", f"Runtime init failed: cannot load core orchestrator ({e})", "red")
+            result("failed", workspace=(payload or {}).get("base_dir", ""))
+            return
+
+    try:
+        return orchestrator.run_solve(payload, _run_solve_impl)
+    except Exception as e:
+        log("err", f"Solve pipeline crashed: {e}", "red")
+        result("failed", workspace=(payload or {}).get("base_dir", ""))
+        return
 

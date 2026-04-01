@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -42,6 +44,60 @@ fn emit_log(app: &AppHandle, tag: &str, msg: &str, cls: &str) {
     app.emit_all("solver-log", event).ok();
 }
 
+fn resolve_solver_path(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Solver path is empty. Set Settings → Solver Path to sidecar/solver.py.".to_string());
+    }
+
+    let mut candidates: Vec<PathBuf> = vec![PathBuf::from(trimmed)];
+
+    if trimmed.contains("sidecarsolver.py") {
+        candidates.push(PathBuf::from(trimmed.replace("sidecarsolver.py", "sidecar/solver.py")));
+    }
+    if trimmed.contains("sidecar\\solver.py") {
+        candidates.push(PathBuf::from(trimmed.replace("sidecar\\solver.py", "sidecar/solver.py")));
+    }
+    if trimmed.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            candidates.push(PathBuf::from(home).join(trimmed.trim_start_matches("~/")));
+        }
+    }
+
+    let mut seen = HashSet::new();
+    let mut tried: Vec<String> = Vec::new();
+
+    for path in candidates {
+        let display = path.to_string_lossy().to_string();
+        if !seen.insert(display.clone()) {
+            continue;
+        }
+        tried.push(display.clone());
+
+        if path.exists() {
+            return Ok(display);
+        }
+
+        if path.is_relative() {
+            if let Ok(cwd) = std::env::current_dir() {
+                let abs = cwd.join(&path);
+                let abs_display = abs.to_string_lossy().to_string();
+                if seen.insert(abs_display.clone()) {
+                    tried.push(abs_display.clone());
+                }
+                if abs.exists() {
+                    return Ok(abs_display);
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "Solver script not found. Tried: {}",
+        tried.join(" | ")
+    ))
+}
+
 // ─── Commands ─────────────────────────────────────────────────────────────────
 
 /// Spawn the Python solver, stream log events back, return final result.
@@ -59,6 +115,8 @@ async fn solve_challenge(
     base_dir: String,
     ctf_name: String,
 ) -> Result<String, String> {
+    let solver_path = resolve_solver_path(&solver_path)?;
+
     let payload = serde_json::json!({
         "mode":           "solve",
         "challenge":      challenge,
@@ -105,6 +163,8 @@ async fn solve_challenge(
 
     let mut final_status = "failed".to_string();
     let mut final_flag: Option<String> = None;
+    let mut saw_result_event = false;
+    let mut stderr_tail: Vec<String> = Vec::new();
 
     while let Ok(Some(line)) = lines.next_line().await {
         let line = line.trim().to_string();
@@ -117,6 +177,7 @@ async fn solve_challenge(
                 let etype = event["type"].as_str().unwrap_or("log");
                 match etype {
                     "result" => {
+                        saw_result_event = true;
                         final_status = event["status"]
                             .as_str()
                             .unwrap_or("failed")
@@ -142,13 +203,38 @@ async fn solve_challenge(
         while let Ok(Some(line)) = err_lines.next_line().await {
             let line = line.trim().to_string();
             if !line.is_empty() {
+                if stderr_tail.len() >= 3 {
+                    stderr_tail.remove(0);
+                }
+                stderr_tail.push(line.clone());
                 emit_log(&app, "err", &format!("[python stderr] {}", line), "red");
             }
         }
     }
 
-    child.wait().await.ok();
+    let exit_status = child.wait().await.ok();
     *state.active_pid.lock().unwrap() = None;
+
+    if !saw_result_event {
+        let exit_txt = exit_status
+            .as_ref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let tail = if stderr_tail.is_empty() {
+            "(no stderr captured)".to_string()
+        } else {
+            stderr_tail.join(" | ")
+        };
+        emit_log(
+            &app,
+            "err",
+            &format!(
+                "[flow] Sidecar exited before emitting result event (exit: {}). Last stderr: {}",
+                exit_txt, tail
+            ),
+            "red",
+        );
+    }
 
     let result = serde_json::json!({
         "status": final_status,
@@ -247,6 +333,8 @@ async fn import_challenges(
     python_path: String,
     solver_path: String,
 ) -> Result<String, String> {
+    let solver_path = resolve_solver_path(&solver_path)?;
+
     let payload = serde_json::json!({
         "mode":     "import",
         "platform": platform,
@@ -275,6 +363,8 @@ async fn import_challenges(
     let stdout = child.stdout.take().unwrap();
     let mut lines = BufReader::new(stdout).lines();
     let mut import_result = String::new();
+    let mut saw_import_result = false;
+    let mut stderr_tail: Vec<String> = Vec::new();
 
     while let Ok(Some(line)) = lines.next_line().await {
         let line = line.trim().to_string();
@@ -283,6 +373,7 @@ async fn import_challenges(
             Ok(event) => {
                 let etype = event["type"].as_str().unwrap_or("log");
                 if etype == "import_result" {
+                    saw_import_result = true;
                     import_result = line.clone();
                 } else {
                     app.emit_all("solver-log", &event).ok();
@@ -294,8 +385,43 @@ async fn import_challenges(
         }
     }
 
-    child.wait().await.ok();
+    if let Some(stderr) = child.stderr.take() {
+        let mut err_lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = err_lines.next_line().await {
+            let line = line.trim().to_string();
+            if !line.is_empty() {
+                if stderr_tail.len() >= 3 {
+                    stderr_tail.remove(0);
+                }
+                stderr_tail.push(line.clone());
+                emit_log(&app, "err", &format!("[python stderr] {}", line), "red");
+            }
+        }
+    }
+
+    let exit_status = child.wait().await.ok();
     *state.active_pid.lock().unwrap() = None;
+
+    if !saw_import_result {
+        let exit_txt = exit_status
+            .as_ref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let tail = if stderr_tail.is_empty() {
+            "(no stderr captured)".to_string()
+        } else {
+            stderr_tail.join(" | ")
+        };
+        emit_log(
+            &app,
+            "err",
+            &format!(
+                "[flow] Import sidecar exited before emitting import_result (exit: {}). Last stderr: {}",
+                exit_txt, tail
+            ),
+            "red",
+        );
+    }
 
     Ok(import_result)
 }

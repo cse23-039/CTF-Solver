@@ -99,6 +99,32 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function normalizePathForCompare(path) {
+  return String(path || '').trim().replace(/\\/g, '/').toLowerCase();
+}
+
+function validateSolverPath(path) {
+  const raw = String(path || '').trim();
+  const norm = normalizePathForCompare(raw);
+  if (!raw) {
+    return { ok: false, message: 'Solver path is required.' };
+  }
+  if (norm.includes('sidecarsolver.py')) {
+    return { ok: false, message: "Invalid path: found 'sidecarsolver.py'. Use 'sidecar/solver.py'." };
+  }
+  if (!norm.endsWith('/sidecar/solver.py') && !norm.endsWith('sidecar/solver.py')) {
+    return { ok: false, message: "Path must point to 'sidecar/solver.py'." };
+  }
+  return { ok: true, message: '✓ Solver path format looks valid.' };
+}
+
+function setSolverPathStatus(message, ok = false) {
+  const el = g('s-solver-status');
+  if (!el) return;
+  el.textContent = message || '';
+  el.style.color = ok ? 'var(--text-mid)' : '#666';
+}
+
 function isLikelyTextFile(file) {
   const type = file.type || '';
   if (type.startsWith('text/')) return true;
@@ -819,6 +845,15 @@ const App = {
   closeSettings() { g('settings-overlay').classList.remove('open'); },
 
   saveSettings() {
+    const solverPathInput = gv('s-solver').trim();
+    const solverValidation = validateSolverPath(solverPathInput);
+    if (!solverValidation.ok) {
+      setSolverPathStatus(`✗ ${solverValidation.message}`, false);
+      addLog('err', `Settings not saved: ${solverValidation.message}`, 'red');
+      g('s-solver')?.focus();
+      return;
+    }
+
     settings.apiKey       = gv('s-apikey').trim();
     settings.model        = gv('s-model');
     settings.modelCustom  = gv('s-model-custom').trim();
@@ -833,7 +868,7 @@ const App = {
     settings.maxRetry     = parseInt(gv('s-maxretry'))||2;
 
     settings.pythonPath   = gv('s-python').trim()||'python3';
-    settings.solverPath   = gv('s-solver').trim();
+    settings.solverPath   = solverPathInput;
     settings.wslDistro    = gv('s-wsl-distro').trim();
     settings.shellTimeout = parseInt(gv('s-shell-timeout'))||30;
     settings.httpTimeout  = parseInt(gv('s-http-timeout'))||20;
@@ -892,6 +927,7 @@ const App = {
     settings.logTimestamps= gc('s-log-timestamps');
     settings.animateLog   = gc('s-animate-log');
 
+    setSolverPathStatus(solverValidation.message, true);
     persistSettings(); applyAll(); App.closeSettings();
     addLog('sys','Settings saved and applied.','bright');
   },
@@ -1003,13 +1039,17 @@ const App = {
       if(!dir) throw new Error('No bin dir');
       const sep=dir.includes('/')? '/' : '\\';
       const guesses=[
+        dir+sep+'..'+sep+'..'+sep+'..'+sep+'sidecar'+sep+'solver.py',
         dir+sep+'..'+sep+'..'+sep+'sidecar'+sep+'solver.py',
         dir+sep+'sidecar'+sep+'solver.py',
         dir+sep+'..'+sep+'sidecar'+sep+'solver.py',
       ];
       // Use first guess — can't stat from Tauri easily, just suggest
       sv('s-solver', guesses[0]);
-      el.textContent=`Suggested: ${guesses[0]} (verify it exists)`;
+      const status = validateSolverPath(guesses[0]);
+      el.textContent = status.ok
+        ? `Suggested: ${guesses[0]} (verify file exists)`
+        : `Suggested path format warning: ${status.message}`;
     } catch(e) {
       el.textContent=`Could not auto-detect: ${e}`;
     }
@@ -1553,6 +1593,14 @@ g('btn-settings').addEventListener('click', ()=>App.openSettings());
           e.preventDefault();
         }
       });
+    });
+  }
+
+  const solverInput = g('s-solver');
+  if (solverInput) {
+    solverInput.addEventListener('input', () => {
+      const status = validateSolverPath(gv('s-solver'));
+      setSolverPathStatus(status.ok ? status.message : `✗ ${status.message}`, status.ok);
     });
   }
 })();
