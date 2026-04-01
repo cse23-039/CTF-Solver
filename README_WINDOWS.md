@@ -70,6 +70,8 @@ source ~/.bashrc
 npm run dev
 ```
 
+Use npm commands from the project root (where `package.json` is), not inside `src-tauri/`.
+
 ### Or test the solver sidecar directly (WSL2 terminal):
 ```bash
 echo '{"mode":"solve","challenge":{"name":"test","category":"General Skills","description":"decode: aGVsbG8="}}' \

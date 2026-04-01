@@ -20,19 +20,21 @@ Modern desktop CTF workspace with autonomous solving, challenge management, and 
 ```bash
 bash install.sh
 npm install
-npm run tauri dev
+npm run dev
 ```
 
 ### Windows
 ```bash
 npm install
-npm run tauri dev
+npm run dev
 ```
 
 Build release:
 ```bash
-npm run tauri build
+npm run build
 ```
+
+Run all npm commands from the project root folder (the folder that contains `package.json`), not from `src-tauri/`.
 
 ## First-run setup
 1. Open `Settings`.
