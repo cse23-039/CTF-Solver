@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable, cast
 
 
 def _k(constraints: list[str], backend: str) -> str:
@@ -12,10 +12,14 @@ def _k(constraints: list[str], backend: str) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def _new_solved_cache() -> dict[str, dict[str, Any]]:
+    return {}
+
+
 @dataclass
 class ConstraintCache:
     max_size: int = 2048
-    solved: dict[str, dict[str, Any]] = field(default_factory=dict)
+    solved: dict[str, dict[str, Any]] = field(default_factory=_new_solved_cache)
 
     def get(self, key: str) -> dict[str, Any] | None:
         return self.solved.get(key)
@@ -57,7 +61,7 @@ def solve_constraints(constraints: list[str], backend: str = "z3", timeout_s: in
 
     unsat_core = _find_unsat_core(constraints)
     status = "sat" if not unsat_core else "unsat"
-    result = {
+    result: dict[str, Any] = {
         "backend": backend,
         "timeout_s": timeout_s,
         "status": status,
@@ -70,5 +74,19 @@ def solve_constraints(constraints: list[str], backend: str = "z3", timeout_s: in
 
 
 def run(input_data: Any = None, **kwargs: Any) -> dict[str, Any]:
-    constraints = kwargs.get("constraints", input_data) or []
-    return solve_constraints([str(c) for c in constraints], backend=kwargs.get("backend", "z3"), timeout_s=int(kwargs.get("timeout_s", 5)))
+    raw_constraints: Any = kwargs.get("constraints", input_data)
+    if raw_constraints is None:
+        constraints_list: list[Any] = []
+    elif isinstance(raw_constraints, (list, tuple, set)):
+        constraints_list = list(cast(Iterable[Any], raw_constraints))
+    else:
+        constraints_list = [raw_constraints]
+
+    backend_raw: Any = kwargs.get("backend", "z3")
+    timeout_raw: Any = kwargs.get("timeout_s", 5)
+
+    return solve_constraints(
+        [str(constraint) for constraint in constraints_list],
+        backend=str(backend_raw),
+        timeout_s=int(timeout_raw),
+    )
