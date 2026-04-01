@@ -93,6 +93,41 @@ function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
 function uid()    { return Math.random().toString(36).slice(2,10); }
 function esc(s)   { return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function ch(id)   { return challenges.find(c=>c.id===id)??null; }
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 1024) return `${bytes || 0} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function isLikelyTextFile(file) {
+  const type = file.type || '';
+  if (type.startsWith('text/')) return true;
+  if (/json|xml|javascript|x-sh|x-python|x-rust|toml|yaml|csv/i.test(type)) return true;
+  return /\.(txt|md|log|json|yaml|yml|xml|csv|py|js|ts|jsx|tsx|rs|c|cc|cpp|h|hpp|java|go|php|html|css|sh|bash|zsh|sql|asm|s|ini|cfg|conf|toml|lock)$/i.test(file.name || '');
+}
+
+function readFileAsText(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => resolve('');
+    reader.readAsText(file);
+  });
+}
+
+async function buildSourceBlock(file) {
+  const header = `[FILE] ${file.name} (${formatBytes(file.size)})`;
+  if (!isLikelyTextFile(file)) {
+    return `${header}\n[Binary or unsupported text preview. Attach path/details manually if needed.]`;
+  }
+  if (file.size > 1024 * 1024) {
+    return `${header}\n[Skipped content: file is larger than 1 MB.]`;
+  }
+  const content = await readFileAsText(file);
+  if (!content.trim()) return `${header}\n[File was empty or unreadable.]`;
+  return `${header}\n${content}`;
+}
+
 function ts() {
   const ms=Date.now()-startTime, s=Math.floor(ms/1000);
   return [Math.floor(s/3600),Math.floor((s%3600)/60),s%60].map(n=>String(n).padStart(2,'0')).join(':');
@@ -541,6 +576,27 @@ const App = {
     g('modal-overlay').classList.remove('open');
     ['m-name','m-desc','m-files','m-inst','m-fmt'].forEach(id=>sv(id,''));
     sv('m-pts','100');
+    if (g('m-files-input')) g('m-files-input').value = '';
+    g('m-files')?.classList.remove('is-drop');
+  },
+  pickSourceFiles() {
+    g('m-files-input')?.click();
+  },
+  async loadSourceFiles(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+
+    const blocks = [];
+    for (const file of files) {
+      blocks.push(await buildSourceBlock(file));
+    }
+
+    const existing = gv('m-files').trim();
+    const next = blocks.join('\n\n');
+    sv('m-files', existing ? `${existing}\n\n${next}` : next);
+    if (g('m-files-input')) g('m-files-input').value = '';
+    addLog('sys', `Attached ${files.length} file(s) into challenge source field.`);
+    g('m-files')?.focus();
   },
   addFromModal() {
     const name=gv('m-name').trim(), desc=gv('m-desc').trim();
@@ -1429,5 +1485,24 @@ g('btn-settings').addEventListener('click', ()=>App.openSettings());
     g('btn-import').style.display     = '';
     if (settings.baseDir) g('btn-open-folder').style.display = '';
     addLog('sys', `Restored connection: ${settings.ctfName} (${settings.platform})`, '');
+  }
+
+  const modalFiles = g('m-files');
+  if (modalFiles) {
+    const prevent = (e) => { e.preventDefault(); e.stopPropagation(); };
+    ['dragenter', 'dragover'].forEach((evt) => {
+      modalFiles.addEventListener(evt, (e) => {
+        prevent(e);
+        modalFiles.classList.add('is-drop');
+      });
+    });
+    ['dragleave', 'dragend', 'drop'].forEach((evt) => {
+      modalFiles.addEventListener(evt, () => modalFiles.classList.remove('is-drop'));
+    });
+    modalFiles.addEventListener('drop', (e) => {
+      prevent(e);
+      const files = e.dataTransfer?.files;
+      if (files && files.length) App.loadSourceFiles(files);
+    });
   }
 })();

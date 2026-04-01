@@ -254,6 +254,10 @@ body.scanlines::after {
 .form-ctrl   { width:100%; background:var(--bg-input); border:1px solid var(--border); color:var(--text-bright); font-family:var(--font); font-size:11.5px; padding:5px 8px; outline:none; border-radius:2px; transition:border-color .12s; }
 .form-ctrl:focus { border-color:var(--border-white); }
 .form-ctrl.is-textarea { resize:vertical; min-height:80px; }
+.form-ctrl.is-textarea.is-drop {
+  border-color: var(--border-white) !important;
+  background: var(--bg-hover) !important;
+}
 .form-ctrl::placeholder { color:var(--text-dim); opacity:1; }
 input.form-ctrl,
 select.form-ctrl,

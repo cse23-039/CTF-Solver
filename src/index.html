@@ -200,9 +200,14 @@
         placeholder="Paste the full challenge description..."></textarea>
     </div>
     <div class="form-group">
-      <label class="form-label">FILES / SOURCE / DATA</label>
+      <div class="form-row" style="align-items:center; gap:6px;">
+        <label class="form-label" style="margin-bottom:0;">FILES / SOURCE / DATA</label>
+        <button class="btn" type="button" onclick="App.pickSourceFiles()" style="padding:2px 8px; font-size:10px; margin-left:auto;">+ BROWSE</button>
+      </div>
       <textarea class="form-ctrl is-textarea" id="m-files" style="min-height:60px"
         placeholder="Paste file contents, source code, hex dumps, ciphertext..."></textarea>
+      <input type="file" id="m-files-input" multiple style="display:none" onchange="App.loadSourceFiles(this.files)">
+      <div class="hint">Drag and drop files into the box, or use + BROWSE to pick files.</div>
     </div>
     <div class="form-group">
       <label class="form-label">INSTANCE / CONNECTION</label>
