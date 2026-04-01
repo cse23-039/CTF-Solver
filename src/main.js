@@ -536,6 +536,9 @@ async function solveCh(c) {
     c.status    = res.status;
     if (res.flag)      c.flag      = res.flag;
     if (res.workspace) c.workspace = res.workspace;
+    if (String(res.status || '').toLowerCase() === 'failed' && res.reason) {
+      addLog('err', `Failure reason: ${res.reason}`, 'red');
+    }
     // Capture final stats if emitted
     if (res.elapsed)   { c.runtime   = res.elapsed; _stopRuntimeTimer(res.elapsed); }
     if (res.iterations){ c.solveIter = res.iterations; }
@@ -1434,6 +1437,9 @@ listen('solver-log', event => {
   const e=event.payload??{};
   if(e.type==='log'&&e.tag&&e.msg!==undefined) {
     addLog(e.tag, e.msg, e.cls||'');
+
+  } else if(e.type==='error') {
+    addLog('err', e.message || e.msg || 'Sidecar error', 'red');
 
   } else if(e.type==='solve_start') {
     // Budget/iteration count now displayed from solver

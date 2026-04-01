@@ -30,6 +30,7 @@ pub struct SolverLogEvent {
 pub struct SolveResult {
     pub status: String,
     pub flag: Option<String>,
+    pub reason: Option<String>,
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -163,6 +164,7 @@ async fn solve_challenge(
 
     let mut final_status = "failed".to_string();
     let mut final_flag: Option<String> = None;
+    let mut final_reason: Option<String> = None;
     let mut saw_result_event = false;
     let mut stderr_tail: Vec<String> = Vec::new();
 
@@ -183,6 +185,16 @@ async fn solve_challenge(
                             .unwrap_or("failed")
                             .to_string();
                         final_flag = event["flag"].as_str().map(String::from);
+                        final_reason = event
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                            .or_else(|| {
+                                event
+                                    .get("message")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from)
+                            });
                     }
                     _ => {
                         // Forward log/tool events verbatim to frontend
@@ -225,13 +237,15 @@ async fn solve_challenge(
         } else {
             stderr_tail.join(" | ")
         };
+        let flow_msg = format!(
+            "[flow] Sidecar exited before emitting result event (exit: {}). Last stderr: {}",
+            exit_txt, tail
+        );
+        final_reason = Some(flow_msg.clone());
         emit_log(
             &app,
             "err",
-            &format!(
-                "[flow] Sidecar exited before emitting result event (exit: {}). Last stderr: {}",
-                exit_txt, tail
-            ),
+            &flow_msg,
             "red",
         );
     }
@@ -239,6 +253,7 @@ async fn solve_challenge(
     let result = serde_json::json!({
         "status": final_status,
         "flag":   final_flag,
+        "reason": final_reason,
     });
 
     Ok(result.to_string())
