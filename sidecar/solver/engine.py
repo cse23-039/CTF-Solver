@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import sys
+import builtins
 import threading
 import time
 from collections import defaultdict
@@ -327,6 +328,16 @@ def _bootstrap_runtime_context() -> None:
 
     if globals().get("result") is None:
         globals()["result"] = _result_fallback
+
+    try:
+        if not hasattr(builtins, "emit"):
+            setattr(builtins, "emit", globals().get("emit", _emit_fallback))
+        if not hasattr(builtins, "log"):
+            setattr(builtins, "log", globals().get("log", _log_fallback))
+        if not hasattr(builtins, "result"):
+            setattr(builtins, "result", globals().get("result", _result_fallback))
+    except Exception:
+        pass
 
     try:
         from core import routing as _core_routing
