@@ -25,6 +25,93 @@ _MODEL_HAIKU = "claude-haiku-4-5-20251001"
 
 _RUNTIME_BOOTSTRAPPED = False
 
+try:
+    from tools.shell import emit, log, result, _shell, IS_WINDOWS, USE_WSL, _w2l
+except Exception:
+    def emit(event_type, **kwargs):
+        try:
+            print(json.dumps({"type": event_type, **kwargs}, ensure_ascii=False), flush=True)
+        except Exception:
+            pass
+
+    def log(tag, msg, cls=""):
+        emit("log", tag=str(tag), msg=str(msg), cls=str(cls))
+
+    def result(status, flag=None, workspace=""):
+        emit("result", status=str(status), flag=flag, workspace=str(workspace or ""))
+
+    def _shell(*args, **kwargs):
+        return "shell unavailable"
+
+    IS_WINDOWS = (os.name == "nt")
+    USE_WSL = False
+
+    def _w2l(path):
+        return str(path)
+
+try:
+    from tools.definitions import TOOLS, TOOL_MAP, _ctf_knowledge
+except Exception:
+    TOOLS = []
+    TOOL_MAP = {}
+    _ctf_knowledge = defaultdict(dict)
+
+try:
+    from memory.knowledge_graph import KnowledgeGraphStore
+    _KG_STORE = KnowledgeGraphStore()
+except Exception:
+    class _NoopKgStore:
+        db_path = ""
+
+        def get_facts(self, *args, **kwargs):
+            return {}
+
+        def upsert_fact(self, *args, **kwargs):
+            return None
+
+        def query_context(self, *args, **kwargs):
+            return []
+
+        def render_cross_ctf_context(self, *args, **kwargs):
+            return ""
+
+        def ingest_solve_record(self, *args, **kwargs):
+            return None
+
+    _KG_STORE = _NoopKgStore()
+
+try:
+    from core import routing as core_routing
+except Exception:
+    class _NoopRouting:
+        @staticmethod
+        def compute_expected_value_score(_challenge):
+            return 0.0
+
+        @staticmethod
+        def decide_strategy_mode(**_kwargs):
+            return {"mode": "balanced", "recommended_tools": []}
+
+    core_routing = _NoopRouting()
+
+try:
+    from core import verification as core_verification
+except Exception:
+    class _NoopVerification:
+        @staticmethod
+        def run_self_verification(**_kwargs):
+            return {"verdict": "fail", "confidence": 0.0, "reason": "verification_unavailable"}
+
+    core_verification = _NoopVerification()
+
+try:
+    from ai.prompt import _normalize_category_key
+except Exception:
+    def _normalize_category_key(category):
+        return str(category or "").strip().lower()
+
+_NETWORK_TOOLS = globals().get("_NETWORK_TOOLS", set())
+
 
 def _safe_fail(payload: dict | None, message: str) -> None:
     msg = str(message or "Unknown solver runtime error")
