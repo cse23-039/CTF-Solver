@@ -32,4 +32,4 @@ default     = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [patch.crates-io]
-wry = { git = "https://github.com/tauri-apps/wry" }
+wry = { git = "https://github.com/tauri-apps/wry", tag = "wry-v0.24.12" }
