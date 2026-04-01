@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import os
 import re
+import shutil
 import sys
+import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from core import orchestrator as core_orchestrator
@@ -93,6 +97,98 @@ def _bootstrap_runtime_context() -> None:
                 globals().setdefault(name, value)
         except Exception:
             continue
+
+    try:
+        from tools.shell import emit as _emit, log as _log, result as _result, _shell as __shell, IS_WINDOWS as _isw, USE_WSL as _uwsl, _w2l as __w2l
+        globals().setdefault("emit", _emit)
+        globals().setdefault("log", _log)
+        globals().setdefault("result", _result)
+        globals().setdefault("_shell", __shell)
+        globals().setdefault("IS_WINDOWS", _isw)
+        globals().setdefault("USE_WSL", _uwsl)
+        globals().setdefault("_w2l", __w2l)
+    except Exception:
+        pass
+
+    try:
+        from tools.definitions import TOOLS as _TOOLS, TOOL_MAP as _TOOL_MAP, _ctf_knowledge as __ctf_knowledge
+        globals().setdefault("TOOLS", _TOOLS)
+        globals().setdefault("TOOL_MAP", _TOOL_MAP)
+        globals().setdefault("_ctf_knowledge", __ctf_knowledge)
+    except Exception:
+        pass
+
+    try:
+        from tools.registry import build_tool_registry as _build_tool_registry, enabled_tools as _enabled_tools
+        globals().setdefault("build_tool_registry", _build_tool_registry)
+        globals().setdefault("enabled_tools", _enabled_tools)
+    except Exception:
+        pass
+
+    try:
+        from tools.forensics_impl import tool_analyze_file as _tool_analyze_file, tool_js_analyze as _tool_js_analyze
+        globals().setdefault("tool_analyze_file", _tool_analyze_file)
+        globals().setdefault("tool_js_analyze", _tool_js_analyze)
+    except Exception:
+        pass
+
+    try:
+        from tools.web_impl import tool_http_request as _tool_http_request
+        globals().setdefault("tool_http_request", _tool_http_request)
+    except Exception:
+        pass
+
+    try:
+        from ai.model import _init_credit_guard as __init_credit_guard
+        globals().setdefault("_init_credit_guard", __init_credit_guard)
+    except Exception:
+        pass
+
+    try:
+        from ai.prompt import build_system_prompt as _build_system_prompt, _build_attack_playbook as __build_attack_playbook, _build_multimodal_feature_pack as __build_multimodal_feature_pack, _normalize_category_key as __normalize_category_key
+        globals().setdefault("build_system_prompt", _build_system_prompt)
+        globals().setdefault("_build_attack_playbook", __build_attack_playbook)
+        globals().setdefault("_build_multimodal_feature_pack", __build_multimodal_feature_pack)
+        globals().setdefault("_normalize_category_key", __normalize_category_key)
+    except Exception:
+        pass
+
+    try:
+        from ai.memory import _tokenize_simple as __tokenize_simple, _store_failure_path as __store_failure_path, _retrieve_memory_v2 as __retrieve_memory_v2, _store_memory_v2 as __store_memory_v2
+        globals().setdefault("_tokenize_simple", __tokenize_simple)
+        globals().setdefault("_store_failure_path", __store_failure_path)
+        globals().setdefault("_retrieve_memory_v2", __retrieve_memory_v2)
+        globals().setdefault("_store_memory_v2", __store_memory_v2)
+    except Exception:
+        pass
+
+    try:
+        from flag.extractor import _build_challenge_signal_pack as __build_challenge_signal_pack, extract_flag as _extract_flag
+        globals().setdefault("_build_challenge_signal_pack", __build_challenge_signal_pack)
+        globals().setdefault("extract_flag", _extract_flag)
+    except Exception:
+        pass
+
+    try:
+        from memory.knowledge_graph import KnowledgeGraphStore as _KnowledgeGraphStore
+        if globals().get("_KG_STORE") is None:
+            globals()["_KG_STORE"] = _KnowledgeGraphStore()
+    except Exception:
+        pass
+
+    try:
+        from core import routing as _core_routing
+        globals().setdefault("core_routing", _core_routing)
+    except Exception:
+        pass
+
+    try:
+        from core import verification as _core_verification
+        globals().setdefault("core_verification", _core_verification)
+    except Exception:
+        pass
+
+    globals().setdefault("_NETWORK_TOOLS", set())
 
     _RUNTIME_BOOTSTRAPPED = True
 
@@ -3802,6 +3898,7 @@ def run_solve(payload):
         "USE_WSL",
         "_w2l",
         "_shell",
+        "_ctf_knowledge",
         "_build_challenge_signal_pack",
         "_init_credit_guard",
         "build_tool_registry",
@@ -3819,6 +3916,11 @@ def run_solve(payload):
         "_KG_STORE",
         "core_routing",
         "core_verification",
+        "_normalize_category_key",
+        "_NETWORK_TOOLS",
+        "tool_analyze_file",
+        "tool_js_analyze",
+        "tool_http_request",
     ]
     missing = [name for name in critical_symbols if name not in globals()]
     if missing:
