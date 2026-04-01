@@ -1,6 +1,8 @@
 """Memory v2 retrieval and injection helpers."""
 from __future__ import annotations
 
+from memory import store as memory_store
+
 
 def _memory_v2_path() -> str:
     return memory_store.memory_v2_path()

@@ -258,8 +258,9 @@ def _bootstrap_runtime_context() -> None:
         pass
 
     try:
-        from ai.model import _init_credit_guard as __init_credit_guard
+        from ai.model import _init_credit_guard as __init_credit_guard, _record_credit_usage as __record_credit_usage
         globals().setdefault("_init_credit_guard", __init_credit_guard)
+        globals().setdefault("_record_credit_usage", __record_credit_usage)
     except Exception:
         pass
 
@@ -273,18 +274,36 @@ def _bootstrap_runtime_context() -> None:
         pass
 
     try:
-        from ai.memory import _tokenize_simple as __tokenize_simple, _store_failure_path as __store_failure_path, _retrieve_memory_v2 as __retrieve_memory_v2, _store_memory_v2 as __store_memory_v2
+        from ai.memory import (
+            _tokenize_simple as __tokenize_simple,
+            _store_failure_path as __store_failure_path,
+            _retrieve_memory_v2 as __retrieve_memory_v2,
+            _store_memory_v2 as __store_memory_v2,
+            _build_memory_injection as __build_memory_injection,
+            _retrieve_failure_paths as __retrieve_failure_paths,
+            _analyze_memory_consistency as __analyze_memory_consistency,
+            _challenge_fingerprint as __challenge_fingerprint,
+        )
         globals().setdefault("_tokenize_simple", __tokenize_simple)
         globals().setdefault("_store_failure_path", __store_failure_path)
         globals().setdefault("_retrieve_memory_v2", __retrieve_memory_v2)
         globals().setdefault("_store_memory_v2", __store_memory_v2)
+        globals().setdefault("_build_memory_injection", __build_memory_injection)
+        globals().setdefault("_retrieve_failure_paths", __retrieve_failure_paths)
+        globals().setdefault("_analyze_memory_consistency", __analyze_memory_consistency)
+        globals().setdefault("_challenge_fingerprint", __challenge_fingerprint)
     except Exception:
         pass
 
     try:
-        from flag.extractor import _build_challenge_signal_pack as __build_challenge_signal_pack, extract_flag as _extract_flag
+        from flag.extractor import (
+            _build_challenge_signal_pack as __build_challenge_signal_pack,
+            extract_flag as _extract_flag,
+            _infer_prefix_from_flag as __infer_prefix_from_flag,
+        )
         globals().setdefault("_build_challenge_signal_pack", __build_challenge_signal_pack)
         globals().setdefault("extract_flag", _extract_flag)
+        globals().setdefault("_infer_prefix_from_flag", __infer_prefix_from_flag)
     except Exception:
         pass
 
@@ -4034,6 +4053,7 @@ def run_solve(payload):
         "_ctf_knowledge",
         "_build_challenge_signal_pack",
         "_init_credit_guard",
+        "_record_credit_usage",
         "build_tool_registry",
         "enabled_tools",
         "TOOLS",
@@ -4042,7 +4062,12 @@ def run_solve(payload):
         "_build_attack_playbook",
         "_build_multimodal_feature_pack",
         "_tokenize_simple",
+        "_build_memory_injection",
+        "_retrieve_failure_paths",
+        "_analyze_memory_consistency",
+        "_challenge_fingerprint",
         "extract_flag",
+        "_infer_prefix_from_flag",
         "_store_failure_path",
         "_retrieve_memory_v2",
         "_store_memory_v2",
