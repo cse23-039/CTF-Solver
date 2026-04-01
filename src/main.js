@@ -115,17 +115,48 @@ function readFileAsText(file) {
   });
 }
 
+function readFileAsBase64(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const raw = String(reader.result ?? '');
+      const comma = raw.indexOf(',');
+      resolve(comma >= 0 ? raw.slice(comma + 1) : '');
+    };
+    reader.onerror = () => resolve('');
+    reader.readAsDataURL(file);
+  });
+}
+
+function extractDroppedFiles(event) {
+  const dt = event?.dataTransfer;
+  if (!dt) return [];
+
+  if (dt.items && dt.items.length) {
+    const out = [];
+    for (const item of Array.from(dt.items)) {
+      if (item.kind !== 'file') continue;
+      const file = item.getAsFile?.();
+      if (file) out.push(file);
+    }
+    if (out.length) return out;
+  }
+
+  return Array.from(dt.files || []);
+}
+
 async function buildSourceBlock(file) {
+  const mime = file.type || 'application/octet-stream';
   const header = `[FILE] ${file.name} (${formatBytes(file.size)})`;
-  if (!isLikelyTextFile(file)) {
-    return `${header}\n[Binary or unsupported text preview. Attach path/details manually if needed.]`;
+
+  if (isLikelyTextFile(file)) {
+    const content = await readFileAsText(file);
+    if (content.trim()) return `${header}\n[TYPE] ${mime}\n${content}`;
   }
-  if (file.size > 1024 * 1024) {
-    return `${header}\n[Skipped content: file is larger than 1 MB.]`;
-  }
-  const content = await readFileAsText(file);
-  if (!content.trim()) return `${header}\n[File was empty or unreadable.]`;
-  return `${header}\n${content}`;
+
+  const b64 = await readFileAsBase64(file);
+  if (!b64) return `${header}\n[TYPE] ${mime}\n[Unreadable file content]`;
+  return `${header}\n[TYPE] ${mime}\n[ENCODING] base64\n[CONTENT_BASE64_BEGIN]\n${b64}\n[CONTENT_BASE64_END]`;
 }
 
 function ts() {
@@ -1501,8 +1532,27 @@ g('btn-settings').addEventListener('click', ()=>App.openSettings());
     });
     modalFiles.addEventListener('drop', (e) => {
       prevent(e);
-      const files = e.dataTransfer?.files;
-      if (files && files.length) App.loadSourceFiles(files);
+      const files = extractDroppedFiles(e);
+      if (files.length) App.loadSourceFiles(files);
+    });
+
+    const modal = g('modal');
+    if (modal) {
+      ['dragenter', 'dragover', 'drop'].forEach((evt) => {
+        modal.addEventListener(evt, prevent);
+      });
+      modal.addEventListener('drop', (e) => {
+        const files = extractDroppedFiles(e);
+        if (files.length) App.loadSourceFiles(files);
+      });
+    }
+
+    ['dragenter', 'dragover', 'drop'].forEach((evt) => {
+      window.addEventListener(evt, (e) => {
+        if (g('modal-overlay')?.classList.contains('open')) {
+          e.preventDefault();
+        }
+      });
     });
   }
 })();
