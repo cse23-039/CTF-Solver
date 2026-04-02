@@ -1,5 +1,15 @@
 .history/
 
+# Local AI/chat/session artifacts (do not commit)
+.copilot/
+.copilot-cache/
+.cursor/
+.roo/
+.windsurf/
+.claude/
+.aider*
+.conversation_history/
+
 __pycache__/
 *.pyc
 
