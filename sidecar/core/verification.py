@@ -6,9 +6,16 @@ import re
 from typing import Any, Callable
 
 
+def _looks_like_flag(candidate_flag: str) -> bool:
+    flag = str(candidate_flag or "").strip()
+    if len(flag) < 6 or len(flag) > 260:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{1,20}\{[^{}\n]{3,220}\}", flag))
+
+
 def validator_agent_secondary(candidate_flag: str, evidence_excerpt: str, model_haiku: str, api_key: str = "") -> dict[str, Any]:
     fallback = {
-        "verdict": "pass" if candidate_flag and "{" in candidate_flag and "}" in candidate_flag else "fail",
+        "verdict": "pass" if _looks_like_flag(candidate_flag) else "fail",
         "confidence": 0.55,
         "reason": "secondary-fallback"
     }

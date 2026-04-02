@@ -1,6 +1,9 @@
 """Language sandboxes and jail-escape tools."""
 from __future__ import annotations
 import re, subprocess, os, shutil, tempfile
+import time
+from tools.shell import _shell, _w2l, IS_WINDOWS, USE_WSL, tool_execute_python
+from flag.extractor import extract_flag
 
 
 def tool_docker_sandbox(operation: str, binary_path: str = "", exploit_code: str = "",

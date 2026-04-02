@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+import atexit
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+
+_TOOL_EXECUTOR = ThreadPoolExecutor(max_workers=8)
+
+
+def _shutdown_tool_executor() -> None:
+    try:
+        _TOOL_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
+
+
+atexit.register(_shutdown_tool_executor)
 
 
 @dataclass
@@ -65,15 +79,18 @@ class ToolRuntime:
             return f"Unknown tool: {tool_name}", False, "unknown_tool"
 
         try:
-            with ThreadPoolExecutor(max_workers=1) as ex:
-                fut = ex.submit(tool_map[tool_name], tool_input)
-                out = fut.result(timeout=max(5, int(self.timeout_s)))
+            fut = _TOOL_EXECUTOR.submit(tool_map[tool_name], tool_input)
+            out = fut.result(timeout=max(5, int(self.timeout_s)))
             txt = str(out)
             ok = self._output_success(txt)
             self._record(tool_name, success=ok)
             self._record_context(tool_name, context=context, success=ok)
             return txt, ok, "ok" if ok else "tool_failed"
         except TimeoutError:
+            try:
+                fut.cancel()  # type: ignore[name-defined]
+            except Exception:
+                pass
             self._record(tool_name, success=False)
             self._record_context(tool_name, context=context, success=False)
             return f"Tool timeout after {self.timeout_s}s", False, "timeout"
@@ -123,5 +140,5 @@ class ToolRuntime:
     @staticmethod
     def _output_success(out: str) -> bool:
         txt = str(out or "").lower()
-        bad_markers = ["tool error", "unknown tool", "traceback", "timed out", "failed"]
+        bad_markers = ["tool error", "unknown tool", "traceback", "timed out", "tool timeout", "exception:"]
         return not any(m in txt for m in bad_markers)

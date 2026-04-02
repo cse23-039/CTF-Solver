@@ -1,6 +1,8 @@
 """Reverse engineering and decompilation tools."""
 from __future__ import annotations
 import re, subprocess, os, shutil
+import time
+from tools.shell import _shell, _w2l, IS_WINDOWS, USE_WSL, tool_execute_python, log
 
 
 def tool_ghidra_decompile(binary_path: str, function_name: str = "main",

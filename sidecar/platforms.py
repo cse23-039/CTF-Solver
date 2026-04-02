@@ -56,7 +56,9 @@ class BasePlatform:
         """Download a file to dest_path. Returns the local path."""
         if not HAS_REQUESTS:
             return "requests not installed"
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        dest_dir = os.path.dirname(dest_path)
+        if dest_dir:
+            os.makedirs(dest_dir, exist_ok=True)
         resp = self.session.get(url, stream=True, timeout=30)
         resp.raise_for_status()
         with open(dest_path, "wb") as f:
@@ -294,6 +296,50 @@ PLATFORMS = {
     "manual":  ManualPlatform,
 }
 
+_PLATFORM_CACHE: dict[str, BasePlatform] = {}
+_MAX_PLATFORM_CACHE = 8
+
+
+def _platform_cache_key(config: dict) -> str:
+    try:
+        return json.dumps(config or {}, sort_keys=True, ensure_ascii=False)
+    except Exception:
+        return str(config)
+
+
+def _get_cached_platform(config: dict) -> BasePlatform:
+    key = _platform_cache_key(config)
+    cached = _PLATFORM_CACHE.get(key)
+    if cached:
+        return cached
+    platform = get_platform(config)
+    _PLATFORM_CACHE[key] = platform
+    if len(_PLATFORM_CACHE) > _MAX_PLATFORM_CACHE:
+        try:
+            oldest = next(iter(_PLATFORM_CACHE.keys()))
+            if oldest != key:
+                _PLATFORM_CACHE.pop(oldest, None)
+        except Exception:
+            pass
+    return platform
+
+
+def _ensure_login(platform: BasePlatform, force: bool = False) -> None:
+    now = time.time()
+    ttl = 1800
+    try:
+        ttl = max(60, int((platform.config or {}).get("session_ttl_seconds", 1800) or 1800))
+    except Exception:
+        ttl = 1800
+
+    last_login = float(getattr(platform, "_login_ts", 0.0) or 0.0)
+    if not force and bool(getattr(platform, "_logged_in", False)) and (now - last_login) < ttl:
+        return
+
+    platform.login()
+    setattr(platform, "_logged_in", True)
+    setattr(platform, "_login_ts", now)
+
 def get_platform(config: dict) -> BasePlatform:
     ptype = config.get("type", "manual").lower()
     cls   = PLATFORMS.get(ptype, ManualPlatform)
@@ -464,12 +510,16 @@ def import_challenges(platform_config: dict, base_dir: str, ctf_name: str, incre
 def submit_flag_to_platform(platform_config: dict, challenge_id: str, flag: str) -> dict:
     if not HAS_REQUESTS:
         return {"error": "requests not installed"}
-    platform = get_platform(platform_config)
+    platform = _get_cached_platform(platform_config)
     try:
-        platform.login()
+        _ensure_login(platform)
         return platform.submit_flag(challenge_id, flag)
     except Exception as e:
-        return {"error": str(e)}
+        try:
+            _ensure_login(platform, force=True)
+            return platform.submit_flag(challenge_id, flag)
+        except Exception:
+            return {"error": str(e)}
 
 
 def get_challenge_status(platform_config: dict, challenge_id: str) -> dict:
@@ -481,10 +531,27 @@ def get_challenge_status(platform_config: dict, challenge_id: str) -> dict:
     if not HAS_REQUESTS:
         return {"error": "requests not installed"}
 
-    platform = get_platform(platform_config)
+    platform = _get_cached_platform(platform_config)
     try:
-        platform.login()
-        rows = platform.get_challenges()
+        _ensure_login(platform)
+        now = time.time()
+        cache_ttl = 90
+        try:
+            cache_ttl = max(10, int((platform.config or {}).get("challenge_status_cache_ttl_seconds", 90) or 90))
+        except Exception:
+            cache_ttl = 90
+
+        rows = getattr(platform, "_challenge_cache_rows", None)
+        rows_ts = float(getattr(platform, "_challenge_cache_ts", 0.0) or 0.0)
+        if not isinstance(rows, list) or (now - rows_ts) > cache_ttl:
+            try:
+                rows = platform.get_challenges()
+            except Exception:
+                _ensure_login(platform, force=True)
+                rows = platform.get_challenges()
+            setattr(platform, "_challenge_cache_rows", rows)
+            setattr(platform, "_challenge_cache_ts", now)
+
         cid = str(challenge_id or "")
         for ch in rows:
             if str(ch.get("platform_id", "")) != cid:

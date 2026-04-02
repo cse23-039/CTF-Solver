@@ -27,6 +27,22 @@ except Exception:  # pragma: no cover
 _DEFAULT_DB = os.path.expanduser("~/.ctf-solver/rag_corpus.sqlite3")
 
 
+def _emit_embedding_fallback_warning_once() -> None:
+    if getattr(_embed_text, "_fallback_warned", False):
+        return
+    setattr(_embed_text, "_fallback_warned", True)
+    try:
+        event = {
+            "type": "log",
+            "tag": "warn",
+            "msg": "RAG embedding fallback active: sentence-transformers unavailable/offline; using lexical hash projection with reduced semantic quality.",
+            "cls": "yellow",
+        }
+        print(json.dumps(event, ensure_ascii=False), flush=True)
+    except Exception:
+        pass
+
+
 def _embed_text(text: str, dim: int = 128) -> list[float]:
     """
     Produce a dense embedding vector for text.
@@ -44,7 +60,7 @@ def _embed_text(text: str, dim: int = 128) -> list[float]:
         vec = _embed_text._model.encode(text, normalize_embeddings=True).tolist()
         return vec[:dim] if len(vec) >= dim else vec + [0.0] * (dim - len(vec))
     except Exception:
-        pass
+        _emit_embedding_fallback_warning_once()
 
     # Order-aware lexical fallback: token unigrams + bigrams with position weighting.
     # This is weaker than transformer embeddings but preserves more semantic structure

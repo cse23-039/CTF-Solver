@@ -1,6 +1,8 @@
 """Steganography, image forensics, and compression tools."""
 from __future__ import annotations
 import re, subprocess, os, shutil, struct, io
+import time
+from tools.shell import _shell, _w2l, IS_WINDOWS, USE_WSL, tool_execute_python, log, emit
 
 
 def tool_audio_steg(audio_path: str, operation: str = "analyze") -> str:

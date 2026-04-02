@@ -147,7 +147,8 @@ def plan_budgeted_call(
             "input_tokens": input_tokens,
         }
 
-    if est_cost > max(soft_remaining, remaining * 0.95):
+    hard_cap = max(0.0, remaining * 0.95)
+    if est_cost > hard_cap:
         return {
             "allowed": False,
             "reason": "estimated_call_exceeds_budget",

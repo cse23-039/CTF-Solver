@@ -9,7 +9,7 @@ from core import routing as core_routing
 from core.parsing import TokenizationCache
 
 
-_MODEL_OPUS = "claude-opus-4-1-20250805"
+_MODEL_OPUS = "claude-opus-4-6"
 _MODEL_SONNET = "claude-sonnet-4-6"
 _MODEL_HAIKU = "claude-haiku-4-5-20251001"
 

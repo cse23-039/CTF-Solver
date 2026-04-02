@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from routing.category_weights import get_profile
-from routing.tool_priority import get_priority
+try:
+    from routing.category_weights import get_profile
+    from routing.tool_priority import get_priority
+except ModuleNotFoundError:
+    from sidecar.routing.category_weights import get_profile
+    from sidecar.routing.tool_priority import get_priority
 
 
 def compute_expected_value_score(challenge: dict) -> float:

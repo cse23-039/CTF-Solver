@@ -28,7 +28,7 @@ All heavy implementations live in the sub-packages:
   memory/                 — store, knowledge_graph
 """
 
-import sys, json
+import sys, json, traceback
 
 from core import budget as core_budget
 from core import checkpoint as core_checkpoint
@@ -219,12 +219,16 @@ _KG_STORE = KnowledgeGraphStore()
 def main():
     raw = sys.stdin.read().strip()
     if not raw:
-        emit("error", message="No input received")
+        reason = "No input received"
+        emit("error", message=reason)
+        print(json.dumps({"type": "result", "status": "failed", "flag": None, "reason": reason}, ensure_ascii=False), flush=True)
         sys.exit(1)
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as e:
-        emit("error", message=f"Invalid JSON: {e}")
+        reason = f"Invalid JSON: {e}"
+        emit("error", message=reason)
+        print(json.dumps({"type": "result", "status": "failed", "flag": None, "reason": reason}, ensure_ascii=False), flush=True)
         sys.exit(1)
 
     mode = payload.get("mode", "solve")
@@ -255,11 +259,15 @@ def main():
             out = derive_counterfactual_deltas(replay_path=replay_path, output_path=output_path, limit=int(payload.get("limit", 3000) or 3000))
             print(json.dumps({"type": "counterfactual", **out}, ensure_ascii=False), flush=True)
         else:
-            emit("error", message=f"Unknown mode: {mode}")
+            reason = f"Unknown mode: {mode}"
+            emit("error", message=reason)
+            print(json.dumps({"type": "result", "status": "failed", "flag": None, "reason": reason}, ensure_ascii=False), flush=True)
             sys.exit(1)
     except Exception as e:
-        emit("error", message=f"Unhandled sidecar error in mode '{mode}': {e}")
-        print(json.dumps({"type": "result", "status": "failed", "flag": None}, ensure_ascii=False), flush=True)
+        tb_tail = "\n".join(traceback.format_exc().splitlines()[-12:])
+        reason = f"Unhandled sidecar error in mode '{mode}': {e}"
+        emit("error", message=f"{reason}\n{tb_tail}")
+        print(json.dumps({"type": "result", "status": "failed", "flag": None, "reason": reason}, ensure_ascii=False), flush=True)
         sys.exit(1)
 
 

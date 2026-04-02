@@ -4240,3 +4240,8 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[patch.unused]]
+name = "wry"
+version = "0.24.12"
+source = "git+https://github.com/tauri-apps/wry?tag=wry-v0.24.12#f66dd823a471ed7ac93b6758f10ce22804ab611c"

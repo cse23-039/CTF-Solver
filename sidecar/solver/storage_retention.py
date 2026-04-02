@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+from collections import deque
 from typing import Any
 
 
@@ -25,15 +27,33 @@ def prune_jsonl(path: str, *, max_lines: int = 50000, max_bytes: int = 64 * 1024
     if not path or not os.path.exists(path):
         return 0
     try:
+        max_lines_i = max(1, int(max_lines))
+        max_bytes_i = max(1, int(max_bytes))
+        kept: deque[tuple[str, int]] = deque(maxlen=max_lines_i)
+        total_bytes = 0
+
         with open(path, "r", encoding="utf-8") as f:
-            lines = [ln for ln in f if ln.strip()]
-        if len(lines) > max(1, int(max_lines)):
-            lines = lines[-int(max_lines):]
-        lines = _truncate_by_size(lines, int(max_bytes))
-        with open(path, "w", encoding="utf-8") as f:
-            for line in lines:
-                f.write(line if line.endswith("\n") else (line + "\n"))
-        return len(lines)
+            for raw_line in f:
+                line = raw_line if raw_line.endswith("\n") else (raw_line + "\n")
+                if not line.strip():
+                    continue
+                size = len(line.encode("utf-8", errors="ignore"))
+                if len(kept) == max_lines_i:
+                    _, old_size = kept.popleft()
+                    total_bytes -= old_size
+                kept.append((line, size))
+                total_bytes += size
+                while kept and total_bytes > max_bytes_i:
+                    _, old_size = kept.popleft()
+                    total_bytes -= old_size
+
+        tmp_dir = os.path.dirname(path) or "."
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=tmp_dir, prefix=".prune_", suffix=".tmp") as tmp:
+            tmp_path = tmp.name
+            for line, _ in kept:
+                tmp.write(line)
+        os.replace(tmp_path, path)
+        return len(kept)
     except Exception:
         return 0
 

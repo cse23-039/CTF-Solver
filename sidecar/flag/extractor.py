@@ -1,6 +1,22 @@
 """Flag extraction and format detection."""
 from __future__ import annotations
+import json
 import re
+
+
+def _emit_fallback(event_type: str, **kwargs):
+    try:
+        print(json.dumps({"type": event_type, **kwargs}, ensure_ascii=False), flush=True)
+    except Exception:
+        pass
+
+
+def _log_fallback(tag: str, msg: str, cls: str = ""):
+    _emit_fallback("log", tag=str(tag), msg=str(msg), cls=str(cls))
+
+
+emit = globals().get("emit") if callable(globals().get("emit")) else _emit_fallback
+log = globals().get("log") if callable(globals().get("log")) else _log_fallback
 
 
 def _normalize_ctf_key(name: str) -> str:
@@ -375,20 +391,20 @@ def tool_flag_extractor(text: str = "", file_path: str = "",
     if not text:
         return "Provide text= or file_path="
 
-    code = f"""
+    code = """
 import re, base64, binascii, urllib.parse
 
-text = {repr(text[:100000])}  # cap at 100KB
-ctf = {repr(ctf_name)}
-op = {repr(operation)}
-extra_patterns = {repr(patterns or [])}
+text = __TEXT__  # cap at 100KB
+ctf = __CTF__
+op = __OP__
+extra_patterns = __PATTERNS__
 
 # Build flag regex patterns
 flag_re = [
-    rf'{{re.escape(ctf)}}{{{{[^}}]+}}}}',  # picoCTF{{...}}
-    r'flag{{[^}}]+}}',
-    r'CTF{{[^}}]+}}',
-    r'[A-Z]{{3,8}}_?{{[^}}]{{5,50}}}}',   # generic CTF{{...}}
+    re.escape(ctf) + '\\{[^\\}]+\\}',
+    'flag\\{[^\\}]+\\}',
+    'CTF\\{[^\\}]+\\}',
+    '[A-Z]{{3,8}}_?\\{[^\\}]{{5,50}}\\}',
 ]
 flag_re += extra_patterns
 
@@ -465,4 +481,8 @@ if total == 0:
     print('No flags or interesting patterns found')
     print(f'Text length: {{len(text)}} chars')
 """
+    code = code.replace("__TEXT__", repr(text[:100000]))
+    code = code.replace("__CTF__", repr(ctf_name))
+    code = code.replace("__OP__", repr(operation))
+    code = code.replace("__PATTERNS__", repr(patterns or []))
     return tool_execute_python(code, timeout=20)

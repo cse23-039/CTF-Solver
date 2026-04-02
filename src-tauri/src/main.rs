@@ -4,15 +4,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Mutex as AsyncMutex;
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
 pub struct SolverState {
-    pub active_pid: Mutex<Option<u32>>,
+    pub active_pids: Mutex<HashSet<u32>>,
 }
 
 // ─── Event types emitted to frontend ──────────────────────────────────────────
@@ -99,6 +100,27 @@ fn resolve_solver_path(input: &str) -> Result<String, String> {
     ))
 }
 
+fn kill_pid_tree(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("pkill")
+            .args(["-TERM", "-P", &pid.to_string()])
+            .output();
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = std::process::Command::new("pkill")
+            .args(["-KILL", "-P", &pid.to_string()])
+            .output();
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
+    }
+}
+
 // ─── Commands ─────────────────────────────────────────────────────────────────
 
 /// Spawn the Python solver, stream log events back, return final result.
@@ -115,6 +137,7 @@ async fn solve_challenge(
     platform: serde_json::Value,
     base_dir: String,
     ctf_name: String,
+    extra_config: serde_json::Value,
 ) -> Result<String, String> {
     let solver_path = resolve_solver_path(&solver_path)?;
 
@@ -127,6 +150,7 @@ async fn solve_challenge(
         "platform":       platform,
         "base_dir":       base_dir,
         "ctf_name":       ctf_name,
+        "extraConfig":    extra_config,
     })
     .to_string();
 
@@ -145,8 +169,9 @@ async fn solve_challenge(
         })?;
 
     // Store PID so we can kill it from cancel_solve
-    if let Some(pid) = child.id() {
-        *state.active_pid.lock().unwrap() = Some(pid);
+    let child_pid = child.id();
+    if let Some(pid) = child_pid {
+        state.active_pids.lock().unwrap().insert(pid);
     }
 
     // Write payload to stdin then close pipe
@@ -162,11 +187,35 @@ async fn solve_challenge(
     let stdout = child.stdout.take().unwrap();
     let mut lines = BufReader::new(stdout).lines();
 
+    let stderr_tail = Arc::new(AsyncMutex::new(Vec::<String>::new()));
+    let stderr_task = if let Some(stderr) = child.stderr.take() {
+        let app_for_stderr = app.clone();
+        let tail_for_stderr = Arc::clone(&stderr_tail);
+        Some(tokio::spawn(async move {
+            let mut err_lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = err_lines.next_line().await {
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                {
+                    let mut tail = tail_for_stderr.lock().await;
+                    if tail.len() >= 3 {
+                        tail.remove(0);
+                    }
+                    tail.push(line.clone());
+                }
+                emit_log(&app_for_stderr, "err", &format!("[python stderr] {}", line), "red");
+            }
+        }))
+    } else {
+        None
+    };
+
     let mut final_status = "failed".to_string();
     let mut final_flag: Option<String> = None;
     let mut final_reason: Option<String> = None;
     let mut saw_result_event = false;
-    let mut stderr_tail: Vec<String> = Vec::new();
 
     while let Ok(Some(line)) = lines.next_line().await {
         let line = line.trim().to_string();
@@ -209,23 +258,15 @@ async fn solve_challenge(
         }
     }
 
-    // Collect stderr for debugging
-    if let Some(stderr) = child.stderr.take() {
-        let mut err_lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = err_lines.next_line().await {
-            let line = line.trim().to_string();
-            if !line.is_empty() {
-                if stderr_tail.len() >= 3 {
-                    stderr_tail.remove(0);
-                }
-                stderr_tail.push(line.clone());
-                emit_log(&app, "err", &format!("[python stderr] {}", line), "red");
-            }
-        }
+    let exit_status = child.wait().await.ok();
+    if let Some(task) = stderr_task {
+        let _ = task.await;
+    }
+    if let Some(pid) = child_pid {
+        state.active_pids.lock().unwrap().remove(&pid);
     }
 
-    let exit_status = child.wait().await.ok();
-    *state.active_pid.lock().unwrap() = None;
+    let stderr_tail = stderr_tail.lock().await.clone();
 
     if !saw_result_event {
         let exit_txt = exit_status
@@ -262,18 +303,14 @@ async fn solve_challenge(
 /// Kill the running Python solver process.
 #[tauri::command]
 fn cancel_solve(state: State<'_, SolverState>) -> Result<(), String> {
-    let pid = state.active_pid.lock().unwrap().take();
-    if let Some(pid) = pid {
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
-        }
-        #[cfg(windows)]
-        {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .output();
-        }
+    let pids: Vec<u32> = {
+        let mut guard = state.active_pids.lock().unwrap();
+        let out = guard.iter().copied().collect::<Vec<u32>>();
+        guard.clear();
+        out
+    };
+    for pid in pids {
+        kill_pid_tree(pid);
     }
     Ok(())
 }
@@ -345,6 +382,20 @@ async fn import_challenges(
     platform: serde_json::Value,
     base_dir: String,
     ctf_name: String,
+    api_key: String,
+    model: String,
+    watch_new_challenges: bool,
+    watch_interval_seconds: u32,
+    watch_cycles: u32,
+    auto_queue_policy: bool,
+    auto_start_solve_on_new: bool,
+    max_auto_starts_per_cycle: u32,
+    single_active_solve_lock: bool,
+    single_active_solve_lock_ttl_seconds: u32,
+    auto_solve_queue_size: u32,
+    auto_solve_queue_heartbeat_seconds: f64,
+    auto_solve_max_retries: u32,
+    extra_config: serde_json::Value,
     python_path: String,
     solver_path: String,
 ) -> Result<String, String> {
@@ -355,6 +406,20 @@ async fn import_challenges(
         "platform": platform,
         "base_dir": base_dir,
         "ctf_name": ctf_name,
+        "api_key": api_key,
+        "model": model,
+        "watchNewChallenges": watch_new_challenges,
+        "watchIntervalSeconds": watch_interval_seconds,
+        "watchCycles": watch_cycles,
+        "autoQueuePolicy": auto_queue_policy,
+        "autoStartSolveOnNew": auto_start_solve_on_new,
+        "maxAutoStartsPerCycle": max_auto_starts_per_cycle,
+        "singleActiveSolveLock": single_active_solve_lock,
+        "singleActiveSolveLockTtlSeconds": single_active_solve_lock_ttl_seconds,
+        "autoSolveQueueSize": auto_solve_queue_size,
+        "autoSolveQueueHeartbeatSeconds": auto_solve_queue_heartbeat_seconds,
+        "autoSolveMaxRetries": auto_solve_max_retries,
+        "extraConfig": extra_config,
     })
     .to_string();
 
@@ -366,8 +431,9 @@ async fn import_challenges(
         .spawn()
         .map_err(|e| format!("Failed to start Python at '{}': {}", python_path, e))?;
 
-    if let Some(pid) = child.id() {
-        *state.active_pid.lock().unwrap() = Some(pid);
+    let child_pid = child.id();
+    if let Some(pid) = child_pid {
+        state.active_pids.lock().unwrap().insert(pid);
     }
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -379,7 +445,30 @@ async fn import_challenges(
     let mut lines = BufReader::new(stdout).lines();
     let mut import_result = String::new();
     let mut saw_import_result = false;
-    let mut stderr_tail: Vec<String> = Vec::new();
+    let stderr_tail = Arc::new(AsyncMutex::new(Vec::<String>::new()));
+    let stderr_task = if let Some(stderr) = child.stderr.take() {
+        let app_for_stderr = app.clone();
+        let tail_for_stderr = Arc::clone(&stderr_tail);
+        Some(tokio::spawn(async move {
+            let mut err_lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = err_lines.next_line().await {
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                {
+                    let mut tail = tail_for_stderr.lock().await;
+                    if tail.len() >= 3 {
+                        tail.remove(0);
+                    }
+                    tail.push(line.clone());
+                }
+                emit_log(&app_for_stderr, "err", &format!("[python stderr] {}", line), "red");
+            }
+        }))
+    } else {
+        None
+    };
 
     while let Ok(Some(line)) = lines.next_line().await {
         let line = line.trim().to_string();
@@ -400,22 +489,15 @@ async fn import_challenges(
         }
     }
 
-    if let Some(stderr) = child.stderr.take() {
-        let mut err_lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = err_lines.next_line().await {
-            let line = line.trim().to_string();
-            if !line.is_empty() {
-                if stderr_tail.len() >= 3 {
-                    stderr_tail.remove(0);
-                }
-                stderr_tail.push(line.clone());
-                emit_log(&app, "err", &format!("[python stderr] {}", line), "red");
-            }
-        }
+    let exit_status = child.wait().await.ok();
+    if let Some(task) = stderr_task {
+        let _ = task.await;
+    }
+    if let Some(pid) = child_pid {
+        state.active_pids.lock().unwrap().remove(&pid);
     }
 
-    let exit_status = child.wait().await.ok();
-    *state.active_pid.lock().unwrap() = None;
+    let stderr_tail = stderr_tail.lock().await.clone();
 
     if !saw_import_result {
         let exit_txt = exit_status
@@ -446,7 +528,7 @@ async fn import_challenges(
 fn main() {
     tauri::Builder::default()
         .manage(SolverState {
-            active_pid: Mutex::new(None),
+            active_pids: Mutex::new(HashSet::new()),
         })
         .invoke_handler(tauri::generate_handler![
             solve_challenge,

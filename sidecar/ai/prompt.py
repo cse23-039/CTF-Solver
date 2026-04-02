@@ -7,8 +7,18 @@ import os
 from flag.extractor import _extract_name_hints, _normalize_hint_values
 from intelligence import ingest as intel_ingest
 from intelligence import playbooks as intel_playbooks
-from tools.misc_impl import tool_write_file
 from tools.shell import IS_WINDOWS, USE_WSL, log
+
+
+def _write_text_file(path: str, content: str) -> None:
+    target = str(path or "").strip()
+    if not target:
+        return
+    parent = os.path.dirname(os.path.abspath(target))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(str(content or ""))
 
 
 def _normalize_category_key(category: str) -> str:
@@ -290,6 +300,6 @@ Format as clean Markdown. Be technical and precise."""
         writeup = resp.content[0].text if resp.content else ""
         if writeup:
             path = os.path.join(workspace, wname)
-            tool_write_file(path, writeup)
+            _write_text_file(path, writeup)
             log("ok",f"Writeup: {path}","white")
     except Exception as e: log("warn",f"Writeup failed: {e}","")

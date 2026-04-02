@@ -11,17 +11,29 @@ except Exception:
     pass
 
 IS_WINDOWS = _platform.system() == "Windows"
-USE_WSL: bool  # set after _wsl_ok() call below
+USE_WSL = False
 
 
 
 def _wsl_ok():
     if not IS_WINDOWS or not shutil.which("wsl"): return False
-    try:
-        r = subprocess.run(["wsl","--list","--quiet"], capture_output=True,
-                           text=True, encoding="utf-16-le", timeout=5)
-        return r.returncode == 0 and bool(r.stdout.strip())
-    except: return False
+    encodings = ["utf-8", "utf-16-le", None]
+    for enc in encodings:
+        try:
+            kwargs = {
+                "capture_output": True,
+                "text": True,
+                "errors": "replace",
+                "timeout": 5,
+            }
+            if enc is not None:
+                kwargs["encoding"] = enc
+            r = subprocess.run(["wsl", "--list", "--quiet"], **kwargs)
+            if r.returncode == 0:
+                return bool((r.stdout or "").strip())
+        except Exception:
+            continue
+    return False
 
 
 def _w2l(p):
@@ -49,20 +61,31 @@ def _shell(cmd, timeout=60, env=None):
     if IS_WINDOWS and USE_WSL:
         safe = cmd.replace("'","'\\''")
         args = ["wsl","bash","-c",safe]
+        use_shell = False
     elif IS_WINDOWS:
-        args = cmd; cmd = None
+        args = cmd
+        use_shell = True
     else:
         args = ["bash", "-c", cmd]
+        use_shell = False
 
     try:
         p = subprocess.run(
-            args, shell=(cmd is not None), capture_output=True,
+            args, shell=use_shell, capture_output=True,
             text=True, encoding="utf-8", errors="replace",
             timeout=timeout, env=env
         )
-        out = p.stdout + ("\n[stderr]\n"+p.stderr if p.stderr.strip() else "")
+        stdout = p.stdout or ""
+        stderr = p.stderr or ""
+        out = stdout + ("\n[stderr]\n" + stderr if stderr.strip() else "")
         out = out.strip() or f"(exit {p.returncode}, no output)"
-        return out[:8000] if len(out)<=8000 else out[:4000]+"\n...[truncated]...\n"+out[-3000:]
+        if len(out) <= 8000:
+            return out
+        if stderr.strip():
+            stderr_tail = stderr[-2500:]
+            stdout_budget = max(600, 8000 - len(stderr_tail) - len("\n...[truncated]...\n\n[stderr]\n"))
+            return (stdout[:stdout_budget] + "\n...[truncated]...\n\n[stderr]\n" + stderr_tail).strip()
+        return (out[:4200] + "\n...[truncated]...\n" + out[-3400:]).strip()
     except subprocess.TimeoutExpired: return f"Timed out after {timeout}s"
     except Exception as e: return f"Shell error: {e}"
 
@@ -78,9 +101,33 @@ def tool_execute_shell(command, timeout=60, working_dir=None):
 def tool_execute_python(code, timeout=60):
     log("sys", "Running Python snippet...", "dim")
     buf_o, buf_e = io.StringIO(), io.StringIO()
+    safe_builtins = {
+        "abs": abs,
+        "all": all,
+        "any": any,
+        "bool": bool,
+        "bytes": bytes,
+        "dict": dict,
+        "enumerate": enumerate,
+        "Exception": Exception,
+        "float": float,
+        "int": int,
+        "len": len,
+        "list": list,
+        "max": max,
+        "min": min,
+        "print": print,
+        "range": range,
+        "set": set,
+        "sorted": sorted,
+        "str": str,
+        "sum": sum,
+        "tuple": tuple,
+        "zip": zip,
+    }
     try:
         with contextlib.redirect_stdout(buf_o), contextlib.redirect_stderr(buf_e):
-            exec(compile(code,"<solver>","exec"), {"__builtins__":__builtins__}, {})
+            exec(compile(code,"<solver>","exec"), {"__builtins__": safe_builtins}, {})
         out = buf_o.getvalue()
         err = buf_e.getvalue()
         full = (out + ("\n[stderr]\n"+err if err.strip() else "")).strip()

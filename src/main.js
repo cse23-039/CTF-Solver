@@ -93,6 +93,26 @@ function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
 function uid()    { return Math.random().toString(36).slice(2,10); }
 function esc(s)   { return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function ch(id)   { return challenges.find(c=>c.id===id)??null; }
+function tryParseJSON(raw) {
+  try { return JSON.parse(raw); }
+  catch(_) { return null; }
+}
+function parseInvokeJson(raw, label='invoke') {
+  const text = String(raw ?? '').trim();
+  if (!text) throw new Error(`${label} returned empty output`);
+
+  const direct = tryParseJSON(text);
+  if (direct && typeof direct === 'object') return direct;
+
+  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const parsed = tryParseJSON(lines[i]);
+    if (parsed && typeof parsed === 'object') return parsed;
+  }
+
+  const tail = text.slice(-500).replace(/\s+/g, ' ').trim();
+  throw new Error(`${label} returned non-JSON output. Raw tail: ${tail || '[empty]'}`);
+}
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes < 1024) return `${bytes || 0} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -195,6 +215,10 @@ function loadSettings() {
   try {
     const s = localStorage.getItem('ctf-solver-v2');
     if (s) settings = Object.assign(deepClone(DEFAULTS), JSON.parse(s));
+    const sessionKey = sessionStorage.getItem('ctf-solver-session-apikey');
+    if (typeof sessionKey === 'string' && sessionKey.trim()) {
+      settings.apiKey = sessionKey.trim();
+    }
     const legacyBg = (settings.colBg || '').toLowerCase() === '#040404';
     const legacyAcc = (settings.colAccent || '').toLowerCase() === '#e8e8e8';
     const legacyBrd = (settings.colBorder || '').toLowerCase() === '#242424';
@@ -206,7 +230,14 @@ function loadSettings() {
   } catch(_) {}
 }
 function persistSettings() {
-  localStorage.setItem('ctf-solver-v2', JSON.stringify(settings));
+  const persisted = deepClone(settings);
+  persisted.apiKey = '';
+  localStorage.setItem('ctf-solver-v2', JSON.stringify(persisted));
+  if (settings.apiKey) {
+    sessionStorage.setItem('ctf-solver-session-apikey', settings.apiKey);
+  } else {
+    sessionStorage.removeItem('ctf-solver-session-apikey');
+  }
 }
 
 // ─── Apply settings → DOM + CSS ──────────────────────────────────────────────
@@ -440,6 +471,37 @@ function buildEnabledTools() {
   return enabled;
 }
 
+function buildExtraConfig() {
+  return {
+    maxTokens:        settings.maxTokens,
+    shellTimeout:     settings.shellTimeout,
+    httpTimeout:      settings.httpTimeout,
+    dlTimeout:        settings.dlTimeout,
+    enabledTools:     buildEnabledTools(),
+    autoSubmit:       settings.autoSubmit,
+    autoWriteup:      settings.autoWriteup,
+    autoWorkspace:    settings.autoWorkspace,
+    writeupName:      settings.writeupName,
+    notesName:        settings.notesName,
+    flagPatterns:     settings.flagPatterns,
+    systemPrompt:     settings.systemPrompt,
+    analysisDepth:    settings.analysisDepth,
+    pivot:            settings.pivot,
+    writeupDetail:    settings.writeupDetail,
+    writeupStyle:     settings.writeupStyle,
+    extraInstructions:settings.extraInstructions,
+    parallelBranches: settings.parallelBranches,
+    hints: {
+      'Binary Exploitation': settings.hintPwn,
+      'Cryptography':        settings.hintCrypto,
+      'Web':                 settings.hintWeb,
+      'Forensics':           settings.hintForensics,
+    },
+    logPreview:  settings.logPreview,
+    wslDistro:   settings.wslDistro,
+  };
+}
+
 // ─── Live runtime timer ───────────────────────────────────────────────────────
 let _runtimeInterval = null;
 let _solveStartTime  = 0;
@@ -503,36 +565,9 @@ async function solveCh(c) {
       platform:      buildPlatformConfig(),
       baseDir:       settings.baseDir || '',
       ctfName:       settings.ctfName || '',
-      extraConfig: {
-        maxTokens:        settings.maxTokens,
-        shellTimeout:     settings.shellTimeout,
-        httpTimeout:      settings.httpTimeout,
-        dlTimeout:        settings.dlTimeout,
-        enabledTools:     buildEnabledTools(),
-        autoSubmit:       settings.autoSubmit,
-        autoWriteup:      settings.autoWriteup,
-        autoWorkspace:    settings.autoWorkspace,
-        writeupName:      settings.writeupName,
-        notesName:        settings.notesName,
-        flagPatterns:     settings.flagPatterns,
-        systemPrompt:     settings.systemPrompt,
-        analysisDepth:    settings.analysisDepth,
-        pivot:            settings.pivot,
-        writeupDetail:    settings.writeupDetail,
-        writeupStyle:     settings.writeupStyle,
-        extraInstructions:settings.extraInstructions,
-        parallelBranches: settings.parallelBranches,
-        hints: {
-          'Binary Exploitation': settings.hintPwn,
-          'Cryptography':        settings.hintCrypto,
-          'Web':                 settings.hintWeb,
-          'Forensics':           settings.hintForensics,
-        },
-        logPreview:  settings.logPreview,
-        wslDistro:   settings.wslDistro,
-      },
+      extraConfig:   buildExtraConfig(),
     });
-    const res = JSON.parse(raw);
+    const res = parseInvokeJson(raw, 'solve_challenge');
     c.status    = res.status;
     if (res.flag)      c.flag      = res.flag;
     if (res.workspace) c.workspace = res.workspace;
@@ -545,7 +580,7 @@ async function solveCh(c) {
     if (res.model)     { c.solveModel= res.model; }
   } catch(err) {
     c.status='failed';
-    addLog('err',`Invoke error: ${err}`,'red');
+    addLog('err',`Invoke error: ${err && err.message ? err.message : err}`,'red');
   }
 
   const elapsed = Math.round((Date.now()-_solveStartTime)/1000);
@@ -738,11 +773,25 @@ const App = {
         platform:   buildPlatformConfig(),
         baseDir:    settings.baseDir,
         ctfName:    settings.ctfName,
+        apiKey:     settings.apiKey,
+        model:      settings.model==='custom' ? settings.modelCustom : settings.model,
+        watchNewChallenges: !!settings.watchNewChallenges,
+        watchIntervalSeconds: Number(settings.watchIntervalSeconds)||30,
+        watchCycles: Number(settings.watchCycles)||0,
+        autoQueuePolicy: settings.autoQueuePolicy!==false,
+        autoStartSolveOnNew: !!settings.autoStartSolveOnNew,
+        maxAutoStartsPerCycle: Number(settings.maxAutoStartsPerCycle)||1,
+        singleActiveSolveLock: settings.singleActiveSolveLock!==false,
+        singleActiveSolveLockTtlSeconds: Number(settings.singleActiveSolveLockTtlSeconds)||21600,
+        autoSolveQueueSize: Number(settings.autoSolveQueueSize)||16,
+        autoSolveQueueHeartbeatSeconds: Number(settings.autoSolveQueueHeartbeatSeconds)||15,
+        autoSolveMaxRetries: Number(settings.autoSolveMaxRetries)||2,
+        extraConfig: buildExtraConfig(),
         pythonPath: settings.pythonPath||'python3',
         solverPath: settings.solverPath,
       });
       if(!raw){ addLog('warn','Import returned empty.'); return; }
-      const res=JSON.parse(raw);
+      const res = parseInvokeJson(raw, 'import_challenges');
       if(res.error){ addLog('err',`Import failed: ${res.error}`,'red'); return; }
       if(res.platform_token){ settings.platformToken=res.platform_token; persistSettings(); }
       const imported=res.challenges||[];

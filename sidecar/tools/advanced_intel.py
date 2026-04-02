@@ -18,11 +18,15 @@ import statistics
 import time
 from collections import Counter, defaultdict, deque
 from typing import Any
+from tools.shell import _shell, _w2l, IS_WINDOWS, USE_WSL, tool_execute_python, log, emit
 
 from solver.symbolic_manager import orchestrate as symbolic_orchestrate
 from solver.unified_scorer import rank_branches as rank_with_unified_scorer
 from solver.reflection_loop import autonomous_exploit_loop
-from routing.heuristics import a_star_attack_path
+try:
+    from routing.heuristics import a_star_attack_path
+except ModuleNotFoundError:
+    from sidecar.routing.heuristics import a_star_attack_path
 from cluster.result_merger import fuse as fuse_branch_results
 from intelligence.ctf_signature_db import load_db as load_signature_db, predict as predict_signatures
 

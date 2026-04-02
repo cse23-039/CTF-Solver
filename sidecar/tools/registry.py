@@ -83,11 +83,17 @@ def build_tool_registry(tools: list[dict[str, Any]], tool_map: dict[str, Any]) -
 
 def enabled_tools(registry: dict[str, Any], enabled_names: set[str]) -> list[dict[str, Any]]:
     by_name = registry.get("tools", {})
+    tool_map = registry.get("tool_map", {}) if isinstance(registry.get("tool_map", {}), dict) else {}
     out = []
     for name in enabled_names:
-        if name in by_name:
-            item = by_name[name]
-            health = item.get("x_health", {})
-            if isinstance(health, dict) and health.get("available", True):
-                out.append(item)
+        if name not in by_name:
+            continue
+        item = dict(by_name[name])
+        if name not in tool_map:
+            item["x_disabled_reason"] = "missing_runtime_mapping"
+            continue
+        health = item.get("x_health", {})
+        if isinstance(health, dict) and not health.get("available", True):
+            item["x_health_unavailable"] = True
+        out.append(item)
     return out

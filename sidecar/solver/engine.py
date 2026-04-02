@@ -6,10 +6,11 @@ import importlib
 import hashlib
 import json
 import os
+import queue
 import re
+import shlex
 import shutil
 import sys
-import builtins
 import threading
 import time
 from collections import defaultdict
@@ -22,11 +23,20 @@ except Exception:
     core_orchestrator = None
 
 
-_MODEL_OPUS = "claude-opus-4-1-20250805"
+_MODEL_OPUS = "claude-opus-4-6"
 _MODEL_SONNET = "claude-sonnet-4-6"
 _MODEL_HAIKU = "claude-haiku-4-5-20251001"
 
 _RUNTIME_BOOTSTRAPPED = False
+_BOOTSTRAP_LOCK = threading.RLock()
+_BOOTSTRAP_ERRORS: list[str] = []
+
+
+def _bind_runtime_symbol(name: str, value: Any) -> None:
+    if value is None:
+        return
+    if globals().get(name) is None:
+        globals()[name] = value
 
 def _emit_fallback(event_type: str, **kwargs: Any) -> None:
     try:
@@ -190,170 +200,187 @@ def _safe_fail(payload: dict | None, message: str) -> None:
 
 
 def _bootstrap_runtime_context() -> None:
-    global _RUNTIME_BOOTSTRAPPED
-    if _RUNTIME_BOOTSTRAPPED:
-        return
+    global _RUNTIME_BOOTSTRAPPED, _BOOTSTRAP_ERRORS
+    required_runtime_symbols = (
+        "emit",
+        "log",
+        "result",
+        "_shell",
+        "_build_challenge_signal_pack",
+        "build_system_prompt",
+        "extract_flag",
+        "_init_credit_guard",
+        "build_tool_registry",
+        "enabled_tools",
+    )
 
-    if globals().get("core_orchestrator") is None:
-        from core import orchestrator as _core_orchestrator
-        globals()["core_orchestrator"] = _core_orchestrator
+    with _BOOTSTRAP_LOCK:
+        if _RUNTIME_BOOTSTRAPPED and all(globals().get(name) is not None for name in required_runtime_symbols):
+            return
 
-    candidate_modules = []
-    main_mod = sys.modules.get("__main__")
-    if main_mod is not None:
-        candidate_modules.append(main_mod)
+        bootstrap_errors: list[str] = []
 
-    for mod_name in ("solver", "sidecar.solver"):
+        def _capture_bootstrap_error(source: str, exc: Exception) -> None:
+            bootstrap_errors.append(f"{source}: {type(exc).__name__}: {exc}")
+
+        if globals().get("core_orchestrator") is None:
+            try:
+                from core import orchestrator as _core_orchestrator
+                globals()["core_orchestrator"] = _core_orchestrator
+            except Exception as e:
+                _capture_bootstrap_error("core.orchestrator", e)
+
+        candidate_modules = []
+        main_mod = sys.modules.get("__main__")
+        if main_mod is not None:
+            candidate_modules.append(main_mod)
+
+        for mod_name in ("solver", "sidecar.solver"):
+            try:
+                candidate_modules.append(importlib.import_module(mod_name))
+            except Exception as e:
+                _capture_bootstrap_error(mod_name, e)
+                continue
+
+        for entry in candidate_modules:
+            try:
+                for name, value in vars(entry).items():
+                    if name.startswith("__"):
+                        continue
+                    _bind_runtime_symbol(name, value)
+            except Exception as e:
+                _capture_bootstrap_error(f"module-scan:{getattr(entry, '__name__', '?')}", e)
+                continue
+
         try:
-            candidate_modules.append(importlib.import_module(mod_name))
-        except Exception:
-            continue
+            from tools.shell import emit as _emit, log as _log, result as _result, _shell as __shell, IS_WINDOWS as _isw, USE_WSL as _uwsl, _w2l as __w2l
+            _bind_runtime_symbol("emit", _emit)
+            _bind_runtime_symbol("log", _log)
+            _bind_runtime_symbol("result", _result)
+            _bind_runtime_symbol("_shell", __shell)
+            _bind_runtime_symbol("IS_WINDOWS", _isw)
+            _bind_runtime_symbol("USE_WSL", _uwsl)
+            _bind_runtime_symbol("_w2l", __w2l)
+        except Exception as e:
+            _capture_bootstrap_error("tools.shell", e)
 
-    for entry in candidate_modules:
         try:
-            for name, value in vars(entry).items():
-                if name.startswith("__"):
-                    continue
-                globals().setdefault(name, value)
-        except Exception:
-            continue
+            from tools.definitions import TOOLS as _TOOLS, TOOL_MAP as _TOOL_MAP, _ctf_knowledge as __ctf_knowledge
+            _bind_runtime_symbol("TOOLS", _TOOLS)
+            _bind_runtime_symbol("TOOL_MAP", _TOOL_MAP)
+            _bind_runtime_symbol("_ctf_knowledge", __ctf_knowledge)
+        except Exception as e:
+            _capture_bootstrap_error("tools.definitions", e)
 
-    try:
-        from tools.shell import emit as _emit, log as _log, result as _result, _shell as __shell, IS_WINDOWS as _isw, USE_WSL as _uwsl, _w2l as __w2l
-        globals().setdefault("emit", _emit)
-        globals().setdefault("log", _log)
-        globals().setdefault("result", _result)
-        globals().setdefault("_shell", __shell)
-        globals().setdefault("IS_WINDOWS", _isw)
-        globals().setdefault("USE_WSL", _uwsl)
-        globals().setdefault("_w2l", __w2l)
-    except Exception:
-        pass
+        try:
+            from tools.registry import build_tool_registry as _build_tool_registry, enabled_tools as _enabled_tools
+            _bind_runtime_symbol("build_tool_registry", _build_tool_registry)
+            _bind_runtime_symbol("enabled_tools", _enabled_tools)
+        except Exception as e:
+            _capture_bootstrap_error("tools.registry", e)
 
-    try:
-        from tools.definitions import TOOLS as _TOOLS, TOOL_MAP as _TOOL_MAP, _ctf_knowledge as __ctf_knowledge
-        globals().setdefault("TOOLS", _TOOLS)
-        globals().setdefault("TOOL_MAP", _TOOL_MAP)
-        globals().setdefault("_ctf_knowledge", __ctf_knowledge)
-    except Exception:
-        pass
+        try:
+            from tools.forensics_impl import tool_analyze_file as _tool_analyze_file, tool_js_analyze as _tool_js_analyze
+            _bind_runtime_symbol("tool_analyze_file", _tool_analyze_file)
+            _bind_runtime_symbol("tool_js_analyze", _tool_js_analyze)
+        except Exception as e:
+            _capture_bootstrap_error("tools.forensics_impl", e)
 
-    try:
-        from tools.registry import build_tool_registry as _build_tool_registry, enabled_tools as _enabled_tools
-        globals().setdefault("build_tool_registry", _build_tool_registry)
-        globals().setdefault("enabled_tools", _enabled_tools)
-    except Exception:
-        pass
+        try:
+            from tools.web_impl import tool_http_request as _tool_http_request
+            _bind_runtime_symbol("tool_http_request", _tool_http_request)
+        except Exception as e:
+            _capture_bootstrap_error("tools.web_impl", e)
 
-    try:
-        from tools.forensics_impl import tool_analyze_file as _tool_analyze_file, tool_js_analyze as _tool_js_analyze
-        globals().setdefault("tool_analyze_file", _tool_analyze_file)
-        globals().setdefault("tool_js_analyze", _tool_js_analyze)
-    except Exception:
-        pass
+        try:
+            from ai.model import _init_credit_guard as __init_credit_guard, _record_credit_usage as __record_credit_usage
+            _bind_runtime_symbol("_init_credit_guard", __init_credit_guard)
+            _bind_runtime_symbol("_record_credit_usage", __record_credit_usage)
+        except Exception as e:
+            _capture_bootstrap_error("ai.model", e)
 
-    try:
-        from tools.web_impl import tool_http_request as _tool_http_request
-        globals().setdefault("tool_http_request", _tool_http_request)
-    except Exception:
-        pass
+        try:
+            from ai.prompt import build_system_prompt as _build_system_prompt, _build_attack_playbook as __build_attack_playbook, _build_multimodal_feature_pack as __build_multimodal_feature_pack, _normalize_category_key as __normalize_category_key
+            _bind_runtime_symbol("build_system_prompt", _build_system_prompt)
+            _bind_runtime_symbol("_build_attack_playbook", __build_attack_playbook)
+            _bind_runtime_symbol("_build_multimodal_feature_pack", __build_multimodal_feature_pack)
+            _bind_runtime_symbol("_normalize_category_key", __normalize_category_key)
+        except Exception as e:
+            _capture_bootstrap_error("ai.prompt", e)
 
-    try:
-        from ai.model import _init_credit_guard as __init_credit_guard, _record_credit_usage as __record_credit_usage
-        globals().setdefault("_init_credit_guard", __init_credit_guard)
-        globals().setdefault("_record_credit_usage", __record_credit_usage)
-    except Exception:
-        pass
+        try:
+            from ai.memory import (
+                _tokenize_simple as __tokenize_simple,
+                _store_failure_path as __store_failure_path,
+                _retrieve_memory_v2 as __retrieve_memory_v2,
+                _store_memory_v2 as __store_memory_v2,
+                _build_memory_injection as __build_memory_injection,
+                _retrieve_failure_paths as __retrieve_failure_paths,
+                _analyze_memory_consistency as __analyze_memory_consistency,
+                _challenge_fingerprint as __challenge_fingerprint,
+            )
+            _bind_runtime_symbol("_tokenize_simple", __tokenize_simple)
+            _bind_runtime_symbol("_store_failure_path", __store_failure_path)
+            _bind_runtime_symbol("_retrieve_memory_v2", __retrieve_memory_v2)
+            _bind_runtime_symbol("_store_memory_v2", __store_memory_v2)
+            _bind_runtime_symbol("_build_memory_injection", __build_memory_injection)
+            _bind_runtime_symbol("_retrieve_failure_paths", __retrieve_failure_paths)
+            _bind_runtime_symbol("_analyze_memory_consistency", __analyze_memory_consistency)
+            _bind_runtime_symbol("_challenge_fingerprint", __challenge_fingerprint)
+        except Exception as e:
+            _capture_bootstrap_error("ai.memory", e)
 
-    try:
-        from ai.prompt import build_system_prompt as _build_system_prompt, _build_attack_playbook as __build_attack_playbook, _build_multimodal_feature_pack as __build_multimodal_feature_pack, _normalize_category_key as __normalize_category_key
-        globals().setdefault("build_system_prompt", _build_system_prompt)
-        globals().setdefault("_build_attack_playbook", __build_attack_playbook)
-        globals().setdefault("_build_multimodal_feature_pack", __build_multimodal_feature_pack)
-        globals().setdefault("_normalize_category_key", __normalize_category_key)
-    except Exception:
-        pass
+        try:
+            from flag.extractor import (
+                _build_challenge_signal_pack as __build_challenge_signal_pack,
+                extract_flag as _extract_flag,
+                _infer_prefix_from_flag as __infer_prefix_from_flag,
+            )
+            _bind_runtime_symbol("_build_challenge_signal_pack", __build_challenge_signal_pack)
+            _bind_runtime_symbol("extract_flag", _extract_flag)
+            _bind_runtime_symbol("_infer_prefix_from_flag", __infer_prefix_from_flag)
+        except Exception as e:
+            _capture_bootstrap_error("flag.extractor", e)
 
-    try:
-        from ai.memory import (
-            _tokenize_simple as __tokenize_simple,
-            _store_failure_path as __store_failure_path,
-            _retrieve_memory_v2 as __retrieve_memory_v2,
-            _store_memory_v2 as __store_memory_v2,
-            _build_memory_injection as __build_memory_injection,
-            _retrieve_failure_paths as __retrieve_failure_paths,
-            _analyze_memory_consistency as __analyze_memory_consistency,
-            _challenge_fingerprint as __challenge_fingerprint,
-        )
-        globals().setdefault("_tokenize_simple", __tokenize_simple)
-        globals().setdefault("_store_failure_path", __store_failure_path)
-        globals().setdefault("_retrieve_memory_v2", __retrieve_memory_v2)
-        globals().setdefault("_store_memory_v2", __store_memory_v2)
-        globals().setdefault("_build_memory_injection", __build_memory_injection)
-        globals().setdefault("_retrieve_failure_paths", __retrieve_failure_paths)
-        globals().setdefault("_analyze_memory_consistency", __analyze_memory_consistency)
-        globals().setdefault("_challenge_fingerprint", __challenge_fingerprint)
-    except Exception:
-        pass
+        try:
+            from memory.knowledge_graph import KnowledgeGraphStore as _KnowledgeGraphStore
+            if globals().get("_KG_STORE") is None:
+                globals()["_KG_STORE"] = _KnowledgeGraphStore()
+        except Exception as e:
+            _capture_bootstrap_error("memory.knowledge_graph", e)
 
-    try:
-        from flag.extractor import (
-            _build_challenge_signal_pack as __build_challenge_signal_pack,
-            extract_flag as _extract_flag,
-            _infer_prefix_from_flag as __infer_prefix_from_flag,
-        )
-        globals().setdefault("_build_challenge_signal_pack", __build_challenge_signal_pack)
-        globals().setdefault("extract_flag", _extract_flag)
-        globals().setdefault("_infer_prefix_from_flag", __infer_prefix_from_flag)
-    except Exception:
-        pass
+        if globals().get("_ctf_knowledge") is None:
+            globals()["_ctf_knowledge"] = defaultdict(dict)
 
-    try:
-        from memory.knowledge_graph import KnowledgeGraphStore as _KnowledgeGraphStore
         if globals().get("_KG_STORE") is None:
-            globals()["_KG_STORE"] = _KnowledgeGraphStore()
-    except Exception:
-        pass
+            globals()["_KG_STORE"] = _NoopKgStore()
 
-    globals().setdefault("_ctf_knowledge", defaultdict(dict))
+        if globals().get("emit") is None:
+            globals()["emit"] = _emit_fallback
 
-    if globals().get("_KG_STORE") is None:
-        globals()["_KG_STORE"] = _NoopKgStore()
+        if globals().get("log") is None:
+            globals()["log"] = _log_fallback
 
-    if globals().get("emit") is None:
-        globals()["emit"] = _emit_fallback
+        if globals().get("result") is None:
+            globals()["result"] = _result_fallback
 
-    if globals().get("log") is None:
-        globals()["log"] = _log_fallback
+        try:
+            from core import routing as _core_routing
+            _bind_runtime_symbol("core_routing", _core_routing)
+        except Exception as e:
+            _capture_bootstrap_error("core.routing", e)
 
-    if globals().get("result") is None:
-        globals()["result"] = _result_fallback
+        try:
+            from core import verification as _core_verification
+            _bind_runtime_symbol("core_verification", _core_verification)
+        except Exception as e:
+            _capture_bootstrap_error("core.verification", e)
 
-    try:
-        if not hasattr(builtins, "emit"):
-            setattr(builtins, "emit", globals().get("emit", _emit_fallback))
-        if not hasattr(builtins, "log"):
-            setattr(builtins, "log", globals().get("log", _log_fallback))
-        if not hasattr(builtins, "result"):
-            setattr(builtins, "result", globals().get("result", _result_fallback))
-    except Exception:
-        pass
+        if globals().get("_NETWORK_TOOLS") is None:
+            globals()["_NETWORK_TOOLS"] = set()
 
-    try:
-        from core import routing as _core_routing
-        globals().setdefault("core_routing", _core_routing)
-    except Exception:
-        pass
-
-    try:
-        from core import verification as _core_verification
-        globals().setdefault("core_verification", _core_verification)
-    except Exception:
-        pass
-
-    globals().setdefault("_NETWORK_TOOLS", set())
-
-    _RUNTIME_BOOTSTRAPPED = True
+        _BOOTSTRAP_ERRORS = bootstrap_errors
+        _RUNTIME_BOOTSTRAPPED = True
 
 
 def _kgkey(ctf_name: str) -> str:
@@ -530,27 +557,30 @@ def tool_pre_solve_recon(binary_path: str = "", url: str = "",
     """
     results = {}
     tasks = []
+    quoted_url = shlex.quote(str(url or ""))
 
     if binary_path and os.path.exists(binary_path):
         sp = _w2l(binary_path) if (IS_WINDOWS and USE_WSL) else binary_path
+        quoted_sp = shlex.quote(str(sp))
+        py_sp_literal = json.dumps(str(sp))
         if category in ("Binary Exploitation", "Reverse Engineering", "Unknown"):
             tasks = [
-                ("file_type",  lambda: _shell(f"file '{sp}' && wc -c '{sp}'")),
-                ("checksec",   lambda: _shell(f"checksec --file='{sp}' 2>/dev/null || python3 -c \"from pwn import ELF; print(ELF('{sp}').checksec())\" 2>/dev/null")),
-                ("strings",    lambda: _shell(f"strings -n 8 '{sp}' | head -200")),
-                ("functions",  lambda: _shell(f"nm '{sp}' 2>/dev/null | head -60; objdump -t '{sp}' 2>/dev/null | grep -i 'F' | head -30")),
+                ("file_type",  lambda: _shell(f"file {quoted_sp} && wc -c {quoted_sp}")),
+                ("checksec",   lambda: _shell(f"checksec --file={quoted_sp} 2>/dev/null || python3 -c \"from pwn import ELF; print(ELF({py_sp_literal}).checksec())\" 2>/dev/null")),
+                ("strings",    lambda: _shell(f"strings -n 8 {quoted_sp} | head -200")),
+                ("functions",  lambda: _shell(f"nm {quoted_sp} 2>/dev/null | head -60; objdump -t {quoted_sp} 2>/dev/null | grep -i 'F' | head -30")),
                 ("entropy",    lambda: tool_analyze_file(binary_path, "entropy")),
             ]
             if category == "Binary Exploitation":
-                tasks.append(("one_gadget", lambda: _shell(f"one_gadget '{sp}' 2>/dev/null | head -30 || echo 'one_gadget not installed'")))
-                tasks.append(("rop_gadgets", lambda: _shell(f"ROPgadget --binary '{sp}' --rop 2>/dev/null | head -40 || echo 'ROPgadget not installed'")))
+                tasks.append(("one_gadget", lambda: _shell(f"one_gadget {quoted_sp} 2>/dev/null | head -30 || echo 'one_gadget not installed'")))
+                tasks.append(("rop_gadgets", lambda: _shell(f"ROPgadget --binary {quoted_sp} --rop 2>/dev/null | head -40 || echo 'ROPgadget not installed'")))
         elif category == "Forensics":
             tasks = [
-                ("file_type",  lambda: _shell(f"file '{sp}' && wc -c '{sp}'")),
-                ("metadata",   lambda: _shell(f"exiftool '{sp}' 2>/dev/null | head -40")),
-                ("binwalk",    lambda: _shell(f"binwalk '{sp}' 2>/dev/null")),
+                ("file_type",  lambda: _shell(f"file {quoted_sp} && wc -c {quoted_sp}")),
+                ("metadata",   lambda: _shell(f"exiftool {quoted_sp} 2>/dev/null | head -40")),
+                ("binwalk",    lambda: _shell(f"binwalk {quoted_sp} 2>/dev/null")),
                 ("entropy",    lambda: tool_analyze_file(binary_path, "entropy")),
-                ("strings",    lambda: _shell(f"strings -n 6 '{sp}' | grep -iE 'flag|ctf|key|secret|pass' | head -30")),
+                ("strings",    lambda: _shell(f"strings -n 6 {quoted_sp} | grep -iE 'flag|ctf|key|secret|pass' | head -30")),
             ]
 
     elif url:
@@ -558,10 +588,14 @@ def tool_pre_solve_recon(binary_path: str = "", url: str = "",
             ("http_headers", lambda: tool_http_request(url, headers={"User-Agent": "Mozilla/5.0"})),
             ("robots",       lambda: tool_http_request(url.rstrip("/")+"/robots.txt")),
             ("source_map",   lambda: tool_js_analyze(url, "fetch_sourcemap") if url.endswith(".js") else "N/A"),
-            ("tech_detect",  lambda: _shell(f"whatweb '{url}' 2>/dev/null || curl -sI '{url}' | head -20")),
+            ("tech_detect",  lambda: _shell(f"whatweb {quoted_url} 2>/dev/null || curl -sI {quoted_url} | head -20")),
         ]
 
     lines = ["## Pre-solve recon results:"]
+    if not tasks:
+        lines.append("\nNo recon targets provided (missing binary_path/url or file not found).")
+        return "\n".join(lines)
+
     with ThreadPoolExecutor(max_workers=min(len(tasks), 6)) as ex:
         futures = {ex.submit(fn): name for name, fn in tasks}
         for fut in as_completed(futures, timeout=60):
@@ -1213,7 +1247,7 @@ def _update_autonomous_phase(state: dict, iteration: int, tool_used: bool,
 def _run_branch(branch_id: int, hypothesis: str, challenge_ctx: dict,
                 api_key: str, active_tools: list, system: str,
                 max_iters: int, extra: dict,
-                result_queue: list, stop_event: threading.Event,
+                result_queue: "queue.Queue[tuple[int, str, str]]", stop_event: threading.Event,
                 credit_guard: dict | None = None) -> None:
     """
     Run a single hypothesis branch. Adds flag to result_queue if found.
@@ -1223,6 +1257,7 @@ def _run_branch(branch_id: int, hypothesis: str, challenge_ctx: dict,
         import anthropic as _ant
         client = _ant.Anthropic(api_key=api_key)
         ctf_name = challenge_ctx.get("ctf_name", "")
+        platform_cfg = challenge_ctx.get("platform_config", {}) if isinstance(challenge_ctx.get("platform_config", {}), dict) else {}
         cat = challenge_ctx.get("category", "")
         name = challenge_ctx.get("name", "")
 
@@ -1235,7 +1270,7 @@ def _run_branch(branch_id: int, hypothesis: str, challenge_ctx: dict,
             if stop_event.is_set(): return
             if i % 2 == 0:
                 try:
-                    live_status = _query_live_challenge_status(_PLATFORM_CONFIG, str(challenge_ctx.get("platform_id", "") or ""))
+                    live_status = _query_live_challenge_status(platform_cfg, str(challenge_ctx.get("platform_id", "") or ""))
                     if bool(live_status.get("solved", False)):
                         emit("solve_cancelled", reason="teammate_solved_parallel", branch=branch_id)
                         stop_event.set()
@@ -1274,20 +1309,32 @@ def _run_branch(branch_id: int, hypothesis: str, challenge_ctx: dict,
                     if "HYPOTHESIS_FAILED" in block.text: return
                     flag = extract_flag(block.text, ctf_name)
                     if flag:
-                        result_queue.append((branch_id, hypothesis, flag))
+                        result_queue.put_nowait((branch_id, hypothesis, flag))
                         stop_event.set()
                         return
                 elif btype == "tool_use":
-                    if block.name in TOOL_MAP:
+                    tool_ctx = {
+                        "is_remote": bool(challenge_ctx.get("instance", "")),
+                        "binary_type": "elf" if bool(challenge_ctx.get("binary_path", "") or challenge_ctx.get("file_path", "")) else "none",
+                        "phase": "parallel_branch",
+                        "latency_bucket": "high" if i > 1 else "low",
+                    }
+                    runtime = globals().get("_TOOL_RUNTIME")
+                    if runtime is not None and hasattr(runtime, "execute"):
+                        tout, _, _ = runtime.execute(str(block.name), block.input, TOOL_MAP, context=tool_ctx)
+                    elif block.name in TOOL_MAP:
                         try:
-                            tout = TOOL_MAP[block.name](block.input)
+                            timeout_s = max(5, int(extra.get("branchToolTimeoutSeconds", 30) or 30))
+                            with ThreadPoolExecutor(max_workers=1) as ex:
+                                fut = ex.submit(TOOL_MAP[block.name], block.input)
+                                tout = fut.result(timeout=timeout_s)
                         except Exception as e:
                             tout = str(e)
                     else:
                         tout = f"Unknown tool: {block.name}"
                     flag = extract_flag(str(tout), ctf_name)
                     if flag:
-                        result_queue.append((branch_id, hypothesis, flag))
+                        result_queue.put_nowait((branch_id, hypothesis, flag))
                         stop_event.set()
                         return
                     tool_results.append({"type":"tool_result","tool_use_id":block.id,"content":str(tout)})
@@ -1311,7 +1358,7 @@ def run_parallel_branches(hypotheses: list, challenge_ctx: dict, api_key: str,
     """
     if not hypotheses: return None
     branches = hypotheses[:3]  # max 3 concurrent branches
-    result_queue = []
+    result_queue: queue.Queue[tuple[int, str, str]] = queue.Queue(maxsize=8)
     stop_event = threading.Event()
 
     log("sys", f"[PARALLEL] Launching {len(branches)} hypothesis branches simultaneously", "bright")
@@ -1338,8 +1385,8 @@ def run_parallel_branches(hypotheses: list, challenge_ctx: dict, api_key: str,
     stop_event.set()
     for t in threads: t.join(timeout=5)
 
-    if result_queue:
-        branch_id, hyp, flag = result_queue[0]
+    if not result_queue.empty():
+        branch_id, hyp, flag = result_queue.get_nowait()
         log("ok", f"[PARALLEL] Branch {branch_id} won: {flag}", "white")
         return hyp, flag
     return None
@@ -1347,7 +1394,19 @@ def run_parallel_branches(hypotheses: list, challenge_ctx: dict, api_key: str,
 
 def run_import(payload):
     _bootstrap_runtime_context()
-    pc=payload.get("platform",{}); base_dir=payload.get("base_dir",""); ctf_name=payload.get("ctf_name","CTF")
+    if not isinstance(payload, dict):
+        log("err", "Invalid import payload", "red")
+        emit("import_result", error="Invalid import payload")
+        return
+
+    pc_payload = payload.get("platform", {})
+    pc = pc_payload if isinstance(pc_payload, dict) else {}
+    base_dir = str(payload.get("base_dir", "") or "")
+    ctf_name = str(payload.get("ctf_name", "CTF") or "CTF")
+
+    if not base_dir:
+        log("err","No base directory set","red"); emit("import_result",error="No base directory"); return
+
     watch = bool(payload.get("watchNewChallenges", False))
     watch_interval = max(5, int(payload.get("watchIntervalSeconds", 30) or 30))
     watch_cycles = int(payload.get("watchCycles", 0) or 0)
@@ -1470,8 +1529,6 @@ def run_import(payload):
         )
         return True
 
-    if not base_dir:
-        log("err","No base directory set","red"); emit("import_result",error="No base directory"); return
     log("sys",f"Connecting to {pc.get('type','?')}...","bright")
     try:
         sys.path.insert(0,os.path.dirname(os.path.abspath(__file__)))
@@ -1568,13 +1625,21 @@ def _run_solve_impl(payload):
     global _PLATFORM_CONFIG, _solve_start_time, _current_model_display
     _solve_start_time = time.time()
 
-    challenge      = payload.get("challenge",{})
-    api_key        = payload.get("api_key","")
-    user_model     = payload.get("model","claude-sonnet-4-6")
-    pc             = payload.get("platform",{})
-    base_dir       = payload.get("base_dir","")
-    ctf_name       = payload.get("ctf_name","")
-    extra          = payload.get("extraConfig",{})
+    if not isinstance(payload, dict):
+        log("err", "Invalid solve payload", "red")
+        result("failed")
+        return
+
+    challenge_payload = payload.get("challenge", {})
+    challenge = challenge_payload if isinstance(challenge_payload, dict) else {}
+    api_key = str(payload.get("api_key", "") or "")
+    user_model = str(payload.get("model", "claude-sonnet-4-6") or "claude-sonnet-4-6")
+    platform_payload = payload.get("platform", {})
+    pc = platform_payload if isinstance(platform_payload, dict) else {}
+    base_dir = str(payload.get("base_dir", "") or "")
+    ctf_name = str(payload.get("ctf_name", "") or "")
+    extra_payload = payload.get("extraConfig", {})
+    extra = extra_payload if isinstance(extra_payload, dict) else {}
     human_loop = {
         "approve_pivot": bool(extra.get("humanApprovePivot", False)),
         "lock_strategy": bool(extra.get("lockStrategy", False)),
@@ -2317,6 +2382,7 @@ def _run_solve_impl(payload):
                 "name": name,
                 "user_msg": user_msg,
                 "platform_id": platform_challenge_id,
+                "platform_config": dict(_PLATFORM_CONFIG) if isinstance(_PLATFORM_CONFIG, dict) else {},
             }
             branch_iters  = min(8, max_iterations // 4)
             branch_result = run_parallel_branches(hypotheses, challenge_ctx, api_key,
@@ -4091,11 +4157,15 @@ def run_solve(payload):
         "tool_js_analyze",
         "tool_http_request",
     ]
-    missing = [name for name in critical_symbols if name not in globals()]
+    missing = [name for name in critical_symbols if globals().get(name) is None]
     if missing:
+        bootstrap_errors = list(globals().get("_BOOTSTRAP_ERRORS", []) or [])
+        details = ""
+        if bootstrap_errors:
+            details = " | bootstrap errors: " + " ; ".join(bootstrap_errors[-6:])
         _safe_fail(
             payload,
-            "Runtime dependency preflight failed. Missing symbols: " + ", ".join(missing),
+            "Runtime dependency preflight failed. Missing symbols: " + ", ".join(missing) + details,
         )
         return
 

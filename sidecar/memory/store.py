@@ -6,7 +6,13 @@ import os
 import re
 import time
 
-from solver.storage_retention import prune_jsonl
+
+def _prune_jsonl(path: str, max_lines: int, max_bytes: int) -> int:
+    try:
+        from solver.storage_retention import prune_jsonl as _solver_prune_jsonl
+        return int(_solver_prune_jsonl(path, max_lines=max_lines, max_bytes=max_bytes) or 0)
+    except Exception:
+        return 0
 
 
 def memory_v2_path() -> str:
@@ -60,7 +66,7 @@ def store_memory_v2(record: dict) -> None:
             record["memory_type"] = "semantic"
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    prune_jsonl(path, max_lines=180000, max_bytes=256 * 1024 * 1024)
+    _prune_jsonl(path, max_lines=180000, max_bytes=256 * 1024 * 1024)
 
 
 def memory_trust_score(rec: dict, ctf_name: str = "", category: str = "", query_fingerprint: str = "") -> float:

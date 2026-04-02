@@ -8,7 +8,7 @@ from typing import Any
 
 def checkpoint_path(workspace: str, challenge_name: str) -> str:
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (challenge_name or "challenge"))[:80]
-    root = workspace or os.path.expanduser("~/.ctf-solver")
+    root = workspace or os.environ.get("CTF_SOLVER_HOME") or os.path.expanduser("~/.ctf-solver")
     return os.path.join(root, ".solver", "checkpoints", f"{safe}.json")
 
 

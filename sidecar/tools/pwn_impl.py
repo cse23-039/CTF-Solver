@@ -1,33 +1,37 @@
 """Binary exploitation and pwn tools."""
 from __future__ import annotations
 import re, subprocess, struct, os, shutil
+import shlex
+import json
 from tools.shell import _shell, _w2l, IS_WINDOWS, USE_WSL, tool_execute_python
 
 
 def tool_binary_analysis(path, operation, args=None):
     """Advanced binary analysis — disassembly, decompilation, checksec, GDB."""
     sp = _w2l(path) if (IS_WINDOWS and USE_WSL) else path
+    sp_q = shlex.quote(str(sp))
+    py_sp = json.dumps(str(sp))
     args = args or ""
     if operation == "checksec":
-        return _shell(f"checksec --file='{sp}' 2>/dev/null || python3 -c \"import pwn; print(pwn.ELF('{sp}').checksec())\" 2>/dev/null")
+        return _shell(f"checksec --file={sp_q} 2>/dev/null || python3 -c \"import pwn; print(pwn.ELF({py_sp}).checksec())\" 2>/dev/null")
     if operation == "disassemble":
-        return _shell(f"objdump -d -M intel '{sp}' | head -200")
+        return _shell(f"objdump -d -M intel {sp_q} | head -200")
     if operation == "disassemble_func":
-        return _shell(f"objdump -d -M intel '{sp}' | grep -A 100 '<{args}>:' | head -60")
+        return _shell(f"objdump -d -M intel {sp_q} | grep -A 100 '<{args}>:' | head -60")
     if operation == "functions":
-        return _shell(f"nm '{sp}' 2>/dev/null; objdump -t '{sp}' 2>/dev/null | grep -i 'F\\|f' | head -40")
+        return _shell(f"nm {sp_q} 2>/dev/null; objdump -t {sp_q} 2>/dev/null | grep -i 'F\\|f' | head -40")
     if operation == "plt_got":
-        return _shell(f"objdump -d '{sp}' | grep -A3 '@plt'")
+        return _shell(f"objdump -d {sp_q} | grep -A3 '@plt'")
     if operation == "decompile_r2":
         return _shell(f"r2 -q -c 'aaa; s main; pdf' '{sp}' 2>/dev/null || echo 'r2 not found'", timeout=30)
     if operation == "decompile_ghidra":
         return _shell(f"ghidra_headless /tmp ghidra_tmp -import '{sp}' -postScript DecompileScript.java -deleteProject 2>/dev/null | head -100 || echo 'Ghidra headless not configured'", timeout=120)
     if operation == "rop_gadgets":
-        return _shell(f"ROPgadget --binary '{sp}' --rop 2>/dev/null | head -60 || ropper -f '{sp}' 2>/dev/null | head -60")
+        return _shell(f"ROPgadget --binary {sp_q} --rop 2>/dev/null | head -60 || ropper -f {sp_q} 2>/dev/null | head -60")
     if operation == "rop_find":
-        return _shell(f"ROPgadget --binary '{sp}' --rop --re '{args}' 2>/dev/null | head -30")
+        return _shell(f"ROPgadget --binary {sp_q} --rop --re {shlex.quote(str(args))} 2>/dev/null | head -30")
     if operation == "libc_version":
-        return _shell(f"strings '{sp}' | grep 'GNU C Library'; ldd '{sp}' 2>/dev/null")
+        return _shell(f"strings {sp_q} | grep 'GNU C Library'; ldd {sp_q} 2>/dev/null")
     if operation == "gdb_run":
         script = args or "run\nbt\ninfo registers\nq"
         with open("/tmp/gdb_script.txt","w") as f: f.write(script)
@@ -238,7 +242,10 @@ def tool_angr_solve(binary_path: str, find_addr: str = "", avoid_addrs: list = N
     """
     sp = repr(binary_path)
     find_str  = f"find={find_addr}," if find_addr else ""
-    avoid_str = f"avoid={[int(a,16) for a in (avoid_addrs or [])]}," if avoid_addrs else ""
+    avoid_repr = repr(list(avoid_addrs or []))
+    avoid_str = ""
+    if avoid_addrs:
+        avoid_str = "avoid=avoid_values,"
     code = f"""
 try:
     import angr, claripy
@@ -254,6 +261,13 @@ try:
     # Constrain to printable ASCII
     for byte in flag.chop(8):
         state.add_constraints(byte >= 0x20, byte <= 0x7e)
+
+    avoid_values = []
+    for _raw in {avoid_repr}:
+        try:
+            avoid_values.append(int(str(_raw).strip(), 0))
+        except Exception:
+            print(f"Skipping invalid avoid addr: {{_raw}}")
 
     sm = proj.factory.simulation_manager(state)
     print(f"Starting angr exploration from {{hex(entry)}}")

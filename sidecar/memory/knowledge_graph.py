@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import tempfile
+import threading
 import time
 from typing import Any
 
@@ -25,12 +27,24 @@ class KnowledgeGraphStore:
     }
 
     def __init__(self, db_path: str | None = None) -> None:
-        self.db_path = db_path or _default_db_path()
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        raw_path = db_path or _default_db_path()
+        parent = os.path.dirname(raw_path)
+        if parent and os.path.exists(parent) and not os.path.isdir(parent):
+            fallback_parent = os.path.join(tempfile.gettempdir(), "ctf-solver")
+            os.makedirs(fallback_parent, exist_ok=True)
+            raw_path = os.path.join(fallback_parent, os.path.basename(raw_path) or "knowledge_corpus.sqlite3")
+            parent = fallback_parent
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        self.db_path = raw_path
+        self._write_lock = threading.RLock()
         self._init_schema()
 
     def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=8)
+        conn = sqlite3.connect(self.db_path, timeout=20)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=20000")
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -79,21 +93,22 @@ class KnowledgeGraphStore:
     def upsert_fact(self, ctf_name: str, key: str, value: str) -> None:
         k = _kgkey(ctf_name)
         ts = int(time.time())
-        with self._conn() as conn:
-            conn.execute(
-                """
-                INSERT INTO facts(ctf_key, fact_key, fact_value, updated_ts)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(ctf_key, fact_key) DO UPDATE SET
-                    fact_value = excluded.fact_value,
-                    updated_ts = excluded.updated_ts
-                """,
-                (k, key, str(value), ts),
-            )
-            conn.execute(
-                "INSERT INTO edges(ctf_key, source_node, target_node, rel, created_ts) VALUES (?, ?, ?, ?, ?)",
-                (k, f"ctf:{k}", f"fact:{k}:{key}", "has_fact", ts),
-            )
+        with self._write_lock:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO facts(ctf_key, fact_key, fact_value, updated_ts)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(ctf_key, fact_key) DO UPDATE SET
+                        fact_value = excluded.fact_value,
+                        updated_ts = excluded.updated_ts
+                    """,
+                    (k, key, str(value), ts),
+                )
+                conn.execute(
+                    "INSERT INTO edges(ctf_key, source_node, target_node, rel, created_ts) VALUES (?, ?, ?, ?, ?)",
+                    (k, f"ctf:{k}", f"fact:{k}:{key}", "has_fact", ts),
+                )
         if any(key.endswith(hk) or hk in key for hk in self.CROSS_CTF_KEYS):
             self._record_cross_ctf_pattern(
                 category=self._infer_category_from_key(key),
@@ -152,32 +167,33 @@ class KnowledgeGraphStore:
                                    pattern_value: str, ctf_name: str,
                                    challenge_name: str) -> None:
         ts = int(time.time())
-        with self._conn() as conn:
-            existing = conn.execute(
-                """
-                SELECT id, frequency FROM cross_ctf_patterns
-                WHERE category = ? AND pattern_key = ? AND pattern_value = ?
-                """,
-                (category, pattern_key, str(pattern_value)[:500]),
-            ).fetchone()
-            if existing:
-                conn.execute(
+        with self._write_lock:
+            with self._conn() as conn:
+                existing = conn.execute(
                     """
-                    UPDATE cross_ctf_patterns
-                    SET frequency = frequency + 1, last_seen_ts = ?
-                    WHERE id = ?
+                    SELECT id, frequency FROM cross_ctf_patterns
+                    WHERE category = ? AND pattern_key = ? AND pattern_value = ?
                     """,
-                    (ts, existing["id"]),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO cross_ctf_patterns
-                      (category, pattern_key, pattern_value, ctf_name, challenge_name, frequency, last_seen_ts)
-                    VALUES (?, ?, ?, ?, ?, 1, ?)
-                    """,
-                    (category, pattern_key, str(pattern_value)[:500], ctf_name, challenge_name, ts),
-                )
+                    (category, pattern_key, str(pattern_value)[:500]),
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        """
+                        UPDATE cross_ctf_patterns
+                        SET frequency = frequency + 1, last_seen_ts = ?
+                        WHERE id = ?
+                        """,
+                        (ts, existing["id"]),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO cross_ctf_patterns
+                          (category, pattern_key, pattern_value, ctf_name, challenge_name, frequency, last_seen_ts)
+                        VALUES (?, ?, ?, ?, ?, 1, ?)
+                        """,
+                        (category, pattern_key, str(pattern_value)[:500], ctf_name, challenge_name, ts),
+                    )
 
     def cross_ctf_pattern_query(self, category: str = "",
                                  technique_hint: str = "",

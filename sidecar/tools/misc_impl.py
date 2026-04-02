@@ -14,6 +14,7 @@ from tools.shell import (
     tool_execute_python,
 )
 from flag.extractor import extract_flag
+from memory.knowledge_graph import KnowledgeGraphStore
 
 
 _PLATFORM_CONFIG: dict = {}
@@ -36,22 +37,7 @@ def _json_result(tool: str, status: str = "ok", confidence: float = 0.8,
         return str(output)
 
 
-_KG_PATH = os.path.expanduser("~/.ctf-solver/knowledge_graph.json")
-
-
-def _load_kg() -> dict:
-    try:
-        with open(_KG_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_kg(data: dict) -> None:
-    os.makedirs(os.path.dirname(_KG_PATH), exist_ok=True)
-    with open(_KG_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+_KG_STORE = KnowledgeGraphStore()
 
 
 def tool_knowledge_store(ctf_name: str, key: str, value: str) -> str:
@@ -61,14 +47,11 @@ def tool_knowledge_store(ctf_name: str, key: str, value: str) -> str:
         return _json_result("knowledge_store", status="error", confidence=0.0,
                             next_action="Provide a non-empty key.",
                             output="missing key")
-    data = _load_kg()
-    bucket = data.setdefault(ctf, {})
-    bucket[k] = {"value": str(value), "ts": int(time.time())}
-    _save_kg(data)
+    _KG_STORE.upsert_fact(ctf, k, str(value))
     return _json_result(
         "knowledge_store",
         confidence=0.95,
-        artifacts=[_KG_PATH],
+        artifacts=[_KG_STORE.db_path],
         next_action="Call knowledge_get at solve start to inject prior facts.",
         output={"ctf_name": ctf, "key": k, "stored": True},
     )
@@ -76,13 +59,11 @@ def tool_knowledge_store(ctf_name: str, key: str, value: str) -> str:
 
 def tool_knowledge_get(ctf_name: str) -> str:
     ctf = (ctf_name or "unknown").strip() or "unknown"
-    data = _load_kg()
-    facts = data.get(ctf, {})
-    flat = {k: (v.get("value") if isinstance(v, dict) else v) for k, v in facts.items()}
+    flat = _KG_STORE.get_facts(ctf)
     return _json_result(
         "knowledge_get",
         confidence=0.9,
-        artifacts=[_KG_PATH] if os.path.exists(_KG_PATH) else [],
+        artifacts=[_KG_STORE.db_path] if os.path.exists(_KG_STORE.db_path) else [],
         next_action="Use returned facts to prioritize likely attack vectors.",
         output={"ctf_name": ctf, "count": len(flat), "facts": flat},
     )
@@ -495,7 +476,9 @@ def tool_create_workspace(base_dir, ctf_name, category, challenge_name):
 
 def tool_write_file(path, content, mode="w"):
     try:
-        os.makedirs(os.path.dirname(os.path.abspath(path)),exist_ok=True)
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path,mode,encoding="utf-8") as f: f.write(content)
         size=os.path.getsize(path)
         log("sys",f"Wrote {size}B → {path}","")
@@ -529,12 +512,22 @@ def tool_download_file(url, dest_path, headers=None, cookies=None):
 
 def tool_submit_flag(flag, challenge_id=""):
     flag=flag.strip()
-    if not _PLATFORM_CONFIG or _PLATFORM_CONFIG.get("type")=="manual":
+    runtime_cfg = dict(_PLATFORM_CONFIG) if isinstance(_PLATFORM_CONFIG, dict) else {}
+    if not runtime_cfg:
+        try:
+            from solver import engine as _engine
+            candidate = getattr(_engine, "_PLATFORM_CONFIG", {})
+            if isinstance(candidate, dict):
+                runtime_cfg = dict(candidate)
+        except Exception:
+            runtime_cfg = {}
+
+    if not runtime_cfg or runtime_cfg.get("type")=="manual":
         return f"Manual mode — submit flag:\n{flag}"
     try:
         sys.path.insert(0,os.path.dirname(os.path.abspath(__file__)))
         from platforms import submit_flag_to_platform
-        res=submit_flag_to_platform(_PLATFORM_CONFIG,challenge_id or _PLATFORM_CONFIG.get("challenge_id",""),flag)
+        res=submit_flag_to_platform(runtime_cfg,challenge_id or runtime_cfg.get("challenge_id",""),flag)
         if res.get("error"): return f"Submission error: {res['error']}"
         if res.get("correct") is True:
             log("ok","✓ Flag accepted!","white")

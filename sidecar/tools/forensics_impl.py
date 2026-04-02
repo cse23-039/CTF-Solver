@@ -1,6 +1,9 @@
 """File analysis, network forensics, and memory forensics tools."""
 from __future__ import annotations
 import re, subprocess, os, shutil
+import math
+from collections import Counter
+from tools.shell import _shell, _w2l, IS_WINDOWS, USE_WSL, tool_execute_python, log, emit
 
 
 def tool_analyze_file(path, operation):
