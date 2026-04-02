@@ -557,7 +557,7 @@ def tool_ecdsa_lattice(operation: str = "hnp", **params) -> str:
     """ECDSA lattice attack (hidden number problem) for biased/partial nonces."""
     n  = params.get("n",0); sigs = params.get("signatures",[]); k = params.get("k",0)
     leaks = params.get("leaks",[]); leak_type = params.get("leak_type","msb")
-    sage = f"""n={n}; k={k}; sigs={sigs}; leaks={leaks}; leak_type=\'{leak_type}\'
+    sage = f"""n={n}; k={k}; sigs={sigs}; leaks={leaks}; leak_type={repr(leak_type)}
 m=len(sigs)
 if m<2: print("Need >=2 sigs"); exit()
 # HNP lattice — Boneh-Venkatesan
@@ -600,8 +600,8 @@ def tool_aes_gcm_attack(operation: str, **params) -> str:
     if operation == "nonce_reuse":
         c1=params.get("c1",""); c2=params.get("c2","")
         t1=params.get("t1",""); t2=params.get("t2","")
-        code = f"""c1,c2=bytes.fromhex(\'{c1}\'),bytes.fromhex(\'{c2}\')
-t1,t2=bytes.fromhex(\'{t1}\'),bytes.fromhex(\'{t2}\')
+        code = f"""c1,c2=bytes.fromhex({repr(c1)}),bytes.fromhex({repr(c2)})
+t1,t2=bytes.fromhex({repr(t1)}),bytes.fromhex({repr(t2)})
 xored=bytes(a^b for a,b in zip(c1,c2))
 print(f'C1 XOR C2 (=P1 XOR P2): {{xored.hex()}}')
 print(f'If P1 known: P2 = known_P1 XOR xored')
@@ -618,7 +618,7 @@ def tool_bleichenbacher(host: str, port: int = 443, operation: str = "probe", **
     """RSA PKCS#1 v1.5 padding oracle: probe (detect oracle), skeleton (attack code)."""
     if operation == "probe":
         code = f"""import socket,ssl,os,time
-host,port=\'{host}\',{port}
+host,port={repr(host)},{port}
 rand_c=os.urandom(256)
 s=socket.socket(); s.settimeout(5); s.connect((host,port))
 if port==443:

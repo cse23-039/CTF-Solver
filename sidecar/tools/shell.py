@@ -1,6 +1,6 @@
 """Shell execution and basic I/O helpers (WSL-aware)."""
 from __future__ import annotations
-import sys, json, subprocess, io, contextlib, traceback, platform as _platform, shutil
+import sys, os, json, subprocess, platform as _platform, shutil
 
 try:
     if hasattr(sys.stdout, "reconfigure"):
@@ -37,9 +37,19 @@ def _wsl_ok():
 
 
 def _w2l(p):
-    if len(p) >= 2 and p[1] == ":":
-        return f"/mnt/{p[0].lower()}{p[2:].replace(chr(92),'/')}"
-    return p.replace("\\","/")
+    raw = str(p or "")
+    if raw.startswith("\\\\"):
+        unc = raw.lstrip("\\").replace("\\", "/")
+        return f"/mnt/unc/{unc}"
+    if len(raw) >= 2 and raw[1] == ":":
+        drive = raw[0].lower()
+        tail = raw[2:].replace("\\", "/")
+        if not tail:
+            tail = "/"
+        elif not tail.startswith("/"):
+            tail = "/" + tail
+        return f"/mnt/{drive}{tail}"
+    return raw.replace("\\", "/")
 
 
 def emit(t, **kw):
@@ -100,40 +110,44 @@ def tool_execute_shell(command, timeout=60, working_dir=None):
 
 def tool_execute_python(code, timeout=60):
     log("sys", "Running Python snippet...", "dim")
-    buf_o, buf_e = io.StringIO(), io.StringIO()
-    safe_builtins = {
-        "abs": abs,
-        "all": all,
-        "any": any,
-        "bool": bool,
-        "bytes": bytes,
-        "dict": dict,
-        "enumerate": enumerate,
-        "Exception": Exception,
-        "float": float,
-        "int": int,
-        "len": len,
-        "list": list,
-        "max": max,
-        "min": min,
-        "print": print,
-        "range": range,
-        "set": set,
-        "sorted": sorted,
-        "str": str,
-        "sum": sum,
-        "tuple": tuple,
-        "zip": zip,
-    }
+    # Full-access execution: CTF solvers need pwntools, z3, pycryptodome, sympy, etc.
+    # The old sandboxed approach broke all imports, defeating the solver's purpose.
+    wrapper = r'''
+import sys, io, contextlib, traceback
+
+code = sys.stdin.read()
+buf_o, buf_e = io.StringIO(), io.StringIO()
+try:
+    with contextlib.redirect_stdout(buf_o), contextlib.redirect_stderr(buf_e):
+        exec(compile(code, "<solver>", "exec"), {"__name__": "__main__"})
+    out = buf_o.getvalue()
+    err = buf_e.getvalue()
+    full = (out + ("\n[stderr]\n" + err if err.strip() else "")).strip()
+    print(full or "(executed \u2014 no output)")
+except BaseException as ex:
+    print(f"{type(ex).__name__}: {ex}\n{traceback.format_exc()}\n{buf_e.getvalue()}".strip())
+'''
+
     try:
-        with contextlib.redirect_stdout(buf_o), contextlib.redirect_stderr(buf_e):
-            exec(compile(code,"<solver>","exec"), {"__builtins__": safe_builtins}, {})
-        out = buf_o.getvalue()
-        err = buf_e.getvalue()
-        full = (out + ("\n[stderr]\n"+err if err.strip() else "")).strip()
-        return full or "(executed — no output)"
-    except BaseException as ex:
-        return f"{type(ex).__name__}: {ex}\n{traceback.format_exc()}\n{buf_e.getvalue()}".strip()
+        p = subprocess.run(
+            [sys.executable, "-c", wrapper],
+            input=str(code or ""),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(1, int(timeout or 60)),
+            env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"},
+        )
+        out = (p.stdout or "").strip()
+        err = (p.stderr or "").strip()
+        if err:
+            out = (out + "\n[stderr]\n" + err).strip()
+        return out or "(executed \u2014 no output)"
+    except subprocess.TimeoutExpired:
+        return f"Timed out after {timeout}s"
+    except Exception as ex:
+        return f"Python execution error: {type(ex).__name__}: {ex}"
 
 
 USE_WSL = _wsl_ok()

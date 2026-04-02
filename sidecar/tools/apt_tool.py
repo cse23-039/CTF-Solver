@@ -1,6 +1,12 @@
 """APT (Advanced Persistent Threat) multi-stage orchestrator tool."""
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+
+# Keep in sync with engine.py model constants.
+_MODEL_OPUS = "claude-opus-4-6"
 
 def tool_apt_orchestrator(operation: str = "all", **params) -> str:
     """

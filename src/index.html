@@ -58,6 +58,9 @@
     <span class="pb-sep">│</span>
     <span class="pb-label">workdir</span>
     <span class="pb-val" id="pb-workdir">not set</span>
+    <span class="pb-sep">│</span>
+    <span class="pb-label">◎ cost</span>
+    <span class="pb-val" id="pb-credit" title="Estimated session API spend">$0.000</span>
     <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
       <span id="pb-conn-status"></span>
       <button class="btn btn-primary" id="btn-connect" onclick="App.openConnectModal()">⚡ CONNECT TO CTF</button>
@@ -158,65 +161,84 @@
 <!-- ══ ADD CHALLENGE MODAL ══════════════════════════════════════════════════ -->
 <div id="modal-overlay" onclick="if(event.target===this)App.closeModal()">
   <div id="modal">
-    <div class="modal-title">[ ADD CHALLENGE ]</div>
+    <div class="modal-title">[ NEW CHALLENGE ]</div>
+
+    <!-- Row 1: Name + Category -->
     <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">NAME *</label>
-        <input type="text" class="form-ctrl" id="m-name" placeholder="e.g. Echo Escape 1">
+      <div class="form-group" style="flex:3">
+        <label class="form-label">CHALLENGE NAME *</label>
+        <input type="text" class="form-ctrl" id="m-name" placeholder="e.g. Echo Escape 1" autocomplete="off">
       </div>
-      <div class="form-group">
+      <div class="form-group" style="flex:2">
         <label class="form-label">CATEGORY *</label>
         <select class="form-ctrl" id="m-cat">
-          <option value="Binary Exploitation">Binary Exploitation (pwn)</option>
-          <option value="Cryptography">Cryptography</option>
-          <option value="Forensics">Forensics</option>
-          <option value="Web">Web</option>
-          <option value="Reverse Engineering">Reverse Engineering</option>
-          <option value="Misc">Misc</option>
-          <option value="OSINT">OSINT</option>
+          <option value="Binary Exploitation">pwn — Binary Exploitation</option>
+          <option value="Cryptography">crypto — Cryptography</option>
+          <option value="Forensics">forensics — Forensics</option>
+          <option value="Web">web — Web</option>
+          <option value="Reverse Engineering">rev — Reverse Engineering</option>
+          <option value="Misc">misc — Misc</option>
+          <option value="OSINT">osint — OSINT</option>
         </select>
       </div>
     </div>
+
+    <!-- Row 2: Difficulty + Flag Format -->
     <div class="form-row">
-      <div class="form-group">
-        <label class="form-label">POINTS</label>
-        <input type="number" class="form-ctrl" id="m-pts" value="100">
-      </div>
       <div class="form-group">
         <label class="form-label">DIFFICULTY</label>
         <select class="form-ctrl" id="m-diff">
-          <option>easy</option><option selected>medium</option>
-          <option>hard</option><option>insane</option>
+          <option value="easy">easy</option>
+          <option value="medium" selected>medium</option>
+          <option value="hard">hard</option>
+          <option value="insane">insane</option>
         </select>
+        <div class="hint">Sets iteration budget: easy→12, medium→25, hard→45, insane→70</div>
       </div>
-      <div class="form-group">
-        <label class="form-label">FLAG FORMAT</label>
-        <input type="text" class="form-ctrl" id="m-fmt" placeholder="picoCTF{...}">
+      <div class="form-group" style="flex:2">
+        <label class="form-label">FLAG FORMAT  <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
+        <input type="text" class="form-ctrl" id="m-fmt" placeholder="e.g. picoCTF{...}" autocomplete="off">
+        <div class="hint">Leave blank — solver auto-detects from 50+ CTF pattern database</div>
       </div>
     </div>
+
+    <!-- Description -->
     <div class="form-group">
       <label class="form-label">DESCRIPTION *</label>
-      <textarea class="form-ctrl is-textarea" id="m-desc"
-        placeholder="Paste the full challenge description..."></textarea>
+      <textarea class="form-ctrl is-textarea" id="m-desc" style="min-height:90px"
+        placeholder="Paste the full challenge description, any hints, and relevant context..."></textarea>
     </div>
+
+    <!-- Instance -->
     <div class="form-group">
-      <div class="form-row" style="align-items:center; gap:6px;">
-        <label class="form-label" style="margin-bottom:0;">FILES / SOURCE / DATA</label>
-        <button class="btn" type="button" onclick="App.pickSourceFiles()" style="padding:2px 8px; font-size:10px; margin-left:auto;">+ BROWSE</button>
-      </div>
-      <textarea class="form-ctrl is-textarea" id="m-files" style="min-height:60px"
-        placeholder="Paste file contents, source code, hex dumps, ciphertext..."></textarea>
-      <input type="file" id="m-files-input" multiple style="display:none" onchange="App.loadSourceFiles(this.files)">
-      <div class="hint">All file types are accepted. Text files are pasted directly; binaries are embedded as Base64.</div>
-    </div>
-    <div class="form-group">
-      <label class="form-label">INSTANCE / CONNECTION</label>
+      <label class="form-label">INSTANCE / CONNECTION  <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
       <input type="text" class="form-ctrl" id="m-inst"
-        placeholder="nc ctf.example.com 1337  |  https://challenge.ctf.io">
+        placeholder="nc ctf.example.com 1337   or   https://challenge.ctf.io" autocomplete="off">
     </div>
+
+    <!-- File attachments -->
+    <div class="form-group">
+      <label class="form-label">ATTACHMENTS  <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
+      <div class="dropzone" id="m-dropzone"
+           ondragenter="App.onDropzoneEnter(event)"
+           ondragover="App.onDropzoneOver(event)"
+           ondragleave="App.onDropzoneLeave(event)"
+           ondrop="App.onDropzoneDrop(event)"
+           onclick="App.pickSourceFiles()">
+        <div class="dz-body">
+          <span class="dz-icon">⊕</span>
+          <span class="dz-text">Drop files here or <span class="dz-browse">browse</span></span>
+          <span class="dz-hint">Source code · binaries · hex dumps · ciphertext — all file types accepted</span>
+        </div>
+      </div>
+      <textarea class="form-ctrl is-textarea" id="m-files" style="min-height:60px;margin-top:6px;font-size:10.5px"
+        placeholder="File contents appear here. You can also paste directly."></textarea>
+      <input type="file" id="m-files-input" multiple style="display:none" onchange="App.loadSourceFiles(this.files)">
+    </div>
+
     <div class="modal-actions">
       <button class="btn" onclick="App.closeModal()">CANCEL</button>
-      <button class="btn btn-primary" onclick="App.addFromModal()">+ ADD</button>
+      <button class="btn btn-primary" onclick="App.addFromModal()">+ ADD CHALLENGE</button>
     </div>
   </div>
 </div>

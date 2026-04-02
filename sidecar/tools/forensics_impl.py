@@ -52,11 +52,14 @@ def tool_analyze_file(path, operation):
         if operation == "binwalk_extract":
             return _shell(f"binwalk -e '{sp}' && ls -la _*/ 2>/dev/null")
         if operation == "steg_lsb":
+            # Use repr() so any path (with quotes, backslashes, spaces) is a
+            # valid Python string literal when embedded in the code string.
+            path_repr = repr(str(path))
             lsb_code = """
 from PIL import Image
 import numpy as np, re
 try:
-    img = Image.open(r'__PATH__')
+    img = Image.open(__PATH_REPR__)
     arr = np.array(img)
     lsbs = arr.flatten() & 1
     bits = ''.join(str(b) for b in lsbs)
@@ -68,7 +71,7 @@ try:
     if flags: print("FLAGS FOUND:", flags)
 except Exception as e:
     print(f"PIL error: {e} — try: pip install Pillow numpy")
-""".replace("__PATH__", path)
+""".replace("__PATH_REPR__", path_repr)
             return tool_execute_python(lsb_code)
         if operation == "steg_tools":
             out = _shell(f"steghide info '{sp}' 2>&1; echo '---'; zsteg '{sp}' 2>/dev/null | head -30; echo '---'; stegseek '{sp}' 2>/dev/null")
@@ -687,10 +690,10 @@ def tool_bytecode_disasm(input_path: str, language: str = "auto", operation: str
         else: language = "unknown"
     if language == "python":
         code = f"""import dis,marshal
-data=open(\'{input_path}\',\'rb\').read()
+data=open({repr(input_path)},'rb').read()
 # Skip magic (4) + bit_field (4) + timestamp/hash (4/8) + size (4)
 for offset in [16,12]:
-    try: co=marshal.loads(data[offset:]); dis.dis(co); print(\'constants:\',co.co_consts[:10]); break
+    try: co=marshal.loads(data[offset:]); dis.dis(co); print('constants:',co.co_consts[:10]); break
     except: pass"""
         out = tool_execute_python(code)
         if "Error" in out: out += "\n" + _shell(f"uncompyle6 '{sp}' 2>/dev/null || pycdc '{sp}' 2>/dev/null")
@@ -718,7 +721,7 @@ def tool_audio_steg(audio_path: str, operation: str = "analyze") -> str:
     if operation == "lsb":
         code = f"""import wave,struct,re
 try:
-    with wave.open(\'{audio_path}\',\'rb\') as w: raw=w.readframes(w.getnframes())
+    with wave.open({repr(audio_path)},'rb') as w: raw=w.readframes(w.getnframes())
     samples=[struct.unpack_from(\'<h\',raw,i*2)[0] for i in range(min(8000*8,len(raw)//2))]
     bits=\'\'.join(str(s&1) for s in samples)
     result=bytes(int(bits[i:i+8],2) for i in range(0,len(bits)-7,8))

@@ -26,7 +26,9 @@ from solver.reflection_loop import autonomous_exploit_loop
 try:
     from routing.heuristics import a_star_attack_path
 except ModuleNotFoundError:
-    from sidecar.routing.heuristics import a_star_attack_path
+    # Stub: sidecar.routing is not a resolvable package path; fall back gracefully.
+    def a_star_attack_path(*_args, **_kwargs):  # type: ignore[misc]
+        return []
 from cluster.result_merger import fuse as fuse_branch_results
 from intelligence.ctf_signature_db import load_db as load_signature_db, predict as predict_signatures
 

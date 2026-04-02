@@ -102,8 +102,8 @@ class ToolRuntime:
     def _record(self, tool_name: str, success: bool) -> None:
         rec = self._get(tool_name)
         # Gentle decay keeps priors adaptive to changing challenge distributions.
-        rec.success = int(rec.success * 0.995)
-        rec.failure = int(rec.failure * 0.995)
+        rec.success = max(0, int(round(rec.success * 0.995)))
+        rec.failure = max(0, int(round(rec.failure * 0.995)))
         if success:
             rec.success += 1
             rec.failure = max(0, rec.failure - 1)
@@ -129,8 +129,8 @@ class ToolRuntime:
             if k not in self._ctx_stats:
                 self._ctx_stats[k] = ToolReliability()
             rec = self._ctx_stats[k]
-            rec.success = int(rec.success * 0.99)
-            rec.failure = int(rec.failure * 0.99)
+            rec.success = max(0, int(round(rec.success * 0.99)))
+            rec.failure = max(0, int(round(rec.failure * 0.99)))
             if success:
                 rec.success += 1
             else:

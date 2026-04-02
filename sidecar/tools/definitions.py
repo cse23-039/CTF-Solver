@@ -832,4 +832,23 @@ _solve_start_time: float = 0.0
 _current_model_display: str = ""
 _critic_threshold: int = 6  # trigger critic after this many fruitless iterations
 
+# Tools that require outbound network access (filtered in local-only / air-gapped mode)
+_NETWORK_TOOLS: set = {
+    "http_request",
+    "concurrent_requests",
+    "tcp_connect",
+    "web_attack",
+    "browser_agent",
+    "sqlmap",
+    "ffuf",
+    "web_crawl",
+    "http_smuggle",
+    "graphql",
+    "websocket_fuzz",
+    "shodan",
+    "whatweb",
+    "nmap_scan",
+    "dns_lookup",
+}
+
 

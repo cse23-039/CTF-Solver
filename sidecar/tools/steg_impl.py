@@ -19,7 +19,7 @@ def tool_audio_steg(audio_path: str, operation: str = "analyze") -> str:
     if operation == "lsb":
         code = f"""import wave,struct,re
 try:
-    with wave.open(\'{audio_path}\',\'rb\') as w: raw=w.readframes(w.getnframes())
+    with wave.open({repr(audio_path)},'rb') as w: raw=w.readframes(w.getnframes())
     samples=[struct.unpack_from(\'<h\',raw,i*2)[0] for i in range(min(8000*8,len(raw)//2))]
     bits=\'\'.join(str(s&1) for s in samples)
     result=bytes(int(bits[i:i+8],2) for i in range(0,len(bits)-7,8))

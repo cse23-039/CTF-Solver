@@ -37,7 +37,21 @@ def _json_result(tool: str, status: str = "ok", confidence: float = 0.8,
         return str(output)
 
 
-_KG_STORE = KnowledgeGraphStore()
+# Lazy singleton — avoids creating a second SQLite connection at import time.
+# engine.py creates its own _KG_STORE; both open the same file, but we defer
+# instantiation here so import ordering never causes a double-open race at
+# startup.
+_KG_STORE: KnowledgeGraphStore | None = None
+_KG_STORE_LOCK = threading.Lock()
+
+
+def _get_kg_store() -> KnowledgeGraphStore:
+    global _KG_STORE
+    if _KG_STORE is None:
+        with _KG_STORE_LOCK:
+            if _KG_STORE is None:
+                _KG_STORE = KnowledgeGraphStore()
+    return _KG_STORE
 
 
 def tool_knowledge_store(ctf_name: str, key: str, value: str) -> str:
@@ -47,11 +61,12 @@ def tool_knowledge_store(ctf_name: str, key: str, value: str) -> str:
         return _json_result("knowledge_store", status="error", confidence=0.0,
                             next_action="Provide a non-empty key.",
                             output="missing key")
-    _KG_STORE.upsert_fact(ctf, k, str(value))
+    kg = _get_kg_store()
+    kg.upsert_fact(ctf, k, str(value))
     return _json_result(
         "knowledge_store",
         confidence=0.95,
-        artifacts=[_KG_STORE.db_path],
+        artifacts=[kg.db_path],
         next_action="Call knowledge_get at solve start to inject prior facts.",
         output={"ctf_name": ctf, "key": k, "stored": True},
     )
@@ -59,11 +74,12 @@ def tool_knowledge_store(ctf_name: str, key: str, value: str) -> str:
 
 def tool_knowledge_get(ctf_name: str) -> str:
     ctf = (ctf_name or "unknown").strip() or "unknown"
-    flat = _KG_STORE.get_facts(ctf)
+    kg = _get_kg_store()
+    flat = kg.get_facts(ctf)
     return _json_result(
         "knowledge_get",
         confidence=0.9,
-        artifacts=[_KG_STORE.db_path] if os.path.exists(_KG_STORE.db_path) else [],
+        artifacts=[kg.db_path] if os.path.exists(kg.db_path) else [],
         next_action="Use returned facts to prioritize likely attack vectors.",
         output={"ctf_name": ctf, "count": len(flat), "facts": flat},
     )

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import queue
+import random
 import re
 import shlex
 import shutil
@@ -30,6 +31,14 @@ _MODEL_HAIKU = "claude-haiku-4-5-20251001"
 _RUNTIME_BOOTSTRAPPED = False
 _BOOTSTRAP_LOCK = threading.RLock()
 _BOOTSTRAP_ERRORS: list[str] = []
+_PLATFORM_CONFIG: dict[str, Any] = {}
+
+ITERATION_BUDGET = {
+    "easy": 15,
+    "medium": 25,
+    "hard": 35,
+    "insane": 45,
+}
 
 
 def _bind_runtime_symbol(name: str, value: Any) -> None:
@@ -102,15 +111,25 @@ USE_WSL = _use_wsl_impl
 _w2l = _w2l_impl
 
 try:
-    from tools.definitions import TOOLS as _TOOLS_IMPORTED, TOOL_MAP as _TOOL_MAP_IMPORTED, _ctf_knowledge as _CTF_KNOWLEDGE_IMPORTED
+    from tools.definitions import (
+        TOOLS as _TOOLS_IMPORTED,
+        TOOL_MAP as _TOOL_MAP_IMPORTED,
+        _ctf_knowledge as _CTF_KNOWLEDGE_IMPORTED,
+        _critic_threshold as _CRITIC_THRESHOLD_IMPORTED,
+        _NETWORK_TOOLS as _NETWORK_TOOLS_IMPORTED,
+    )
 except Exception:
     _TOOLS_IMPORTED = []
     _TOOL_MAP_IMPORTED = {}
     _CTF_KNOWLEDGE_IMPORTED = defaultdict(dict)
+    _CRITIC_THRESHOLD_IMPORTED = 4
+    _NETWORK_TOOLS_IMPORTED = set()
 
 TOOLS = _TOOLS_IMPORTED
 TOOL_MAP = _TOOL_MAP_IMPORTED
 _ctf_knowledge = _CTF_KNOWLEDGE_IMPORTED
+_critic_threshold = int(_CRITIC_THRESHOLD_IMPORTED or 4)
+_NETWORK_TOOLS = set(_NETWORK_TOOLS_IMPORTED or [])
 
 
 def _create_kg_store() -> Any:
@@ -153,7 +172,7 @@ except Exception:
     def _normalize_category_key(category: str) -> str:
         return str(category or "").strip().lower()
 
-_NETWORK_TOOLS = globals().get("_NETWORK_TOOLS", set())
+_NETWORK_TOOLS = set(globals().get("_NETWORK_TOOLS", _NETWORK_TOOLS or set()) or set())
 
 
 def _safe_fail(payload: dict | None, message: str) -> None:
@@ -170,10 +189,10 @@ def _safe_fail(payload: dict | None, message: str) -> None:
         except Exception:
             pass
 
+    # Always emit a result event so the frontend isn't left hanging
     workspace = ""
     if isinstance(payload, dict):
         workspace = str(payload.get("base_dir", "") or "")
-
     try:
         result_fn = globals().get("result")
         if callable(result_fn):
@@ -197,6 +216,90 @@ def _safe_fail(payload: dict | None, message: str) -> None:
             )
         except Exception:
             pass
+
+
+def _coerce_text(value: Any, default: str = "") -> str:
+    if value is None:
+        return str(default)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    try:
+        return json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        return str(default)
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        if isinstance(value, bool):
+            return int(value)
+        if value is None:
+            return int(default)
+        if isinstance(value, str) and not value.strip():
+            return int(default)
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return float(default)
+        if isinstance(value, str) and not value.strip():
+            return float(default)
+        out = float(value)
+        if out != out:
+            return float(default)
+        return out
+    except Exception:
+        return float(default)
+
+
+def _normalize_challenge_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    challenge_payload = payload.get("challenge", {})
+    if isinstance(challenge_payload, dict):
+        challenge = dict(challenge_payload)
+    elif isinstance(challenge_payload, list):
+        first = challenge_payload[0] if challenge_payload else {}
+        if isinstance(first, dict):
+            challenge = dict(first)
+        elif isinstance(first, str):
+            challenge = {"description": first}
+        else:
+            challenge = {}
+    elif isinstance(challenge_payload, str):
+        parsed = None
+        try:
+            maybe = json.loads(challenge_payload)
+            if isinstance(maybe, dict):
+                parsed = maybe
+            elif isinstance(maybe, list) and maybe and isinstance(maybe[0], dict):
+                parsed = maybe[0]
+        except Exception:
+            parsed = None
+        challenge = dict(parsed) if isinstance(parsed, dict) else {"description": challenge_payload}
+    else:
+        challenge = {}
+
+    if not challenge:
+        challenge_like_keys = {
+            "id", "platform_id", "name", "title", "category", "difficulty", "points",
+            "description", "files", "instance", "flagFormat", "flag_format", "workspace",
+            "solve_count", "solves", "binary_path", "file_path",
+        }
+        top_level = {k: v for k, v in payload.items() if k in challenge_like_keys}
+        if top_level:
+            challenge = top_level
+
+    # Some platforms send 'title' instead of 'name'; normalise so downstream
+    # code (challenge.get("name", "")) always resolves the challenge name.
+    if "title" in challenge and "name" not in challenge:
+        challenge["name"] = challenge["title"]
+
+    return challenge
 
 
 def _bootstrap_runtime_context() -> None:
@@ -271,6 +374,13 @@ def _bootstrap_runtime_context() -> None:
             _bind_runtime_symbol("_ctf_knowledge", __ctf_knowledge)
         except Exception as e:
             _capture_bootstrap_error("tools.definitions", e)
+
+        try:
+            from tools.definitions import _critic_threshold as __critic_threshold, _NETWORK_TOOLS as __network_tools
+            _bind_runtime_symbol("_critic_threshold", int(__critic_threshold or 4))
+            _bind_runtime_symbol("_NETWORK_TOOLS", set(__network_tools or []))
+        except Exception as e:
+            _capture_bootstrap_error("tools.definitions.runtime", e)
 
         try:
             from tools.registry import build_tool_registry as _build_tool_registry, enabled_tools as _enabled_tools
@@ -378,13 +488,19 @@ def _bootstrap_runtime_context() -> None:
 
         if globals().get("_NETWORK_TOOLS") is None:
             globals()["_NETWORK_TOOLS"] = set()
+        if globals().get("_critic_threshold") is None:
+            globals()["_critic_threshold"] = 4
 
         _BOOTSTRAP_ERRORS = bootstrap_errors
         _RUNTIME_BOOTSTRAPPED = True
 
 
 def _kgkey(ctf_name: str) -> str:
-    return re.sub(r'[^a-z0-9]', '', ctf_name.lower())
+    key = str(ctf_name or "").lower().strip()
+    key = re.sub(r"[\s\-_]+", "", key)
+    key = re.sub(r"\d{4}$", "", key)
+    key = re.sub(r"[^a-z0-9]", "", key)
+    return key
 
 
 def tool_knowledge_store(ctf_name: str, key: str, value: str) -> str:
@@ -611,8 +727,14 @@ def tool_pre_solve_recon(binary_path: str = "", url: str = "",
 
 
 def _validator_agent_secondary(candidate_flag: str, evidence_excerpt: str, api_key: str = "") -> dict:
+    def _looks_like_flag_local(flag_text: str) -> bool:
+        flag_text = str(flag_text or "").strip()
+        if len(flag_text) < 6 or len(flag_text) > 260:
+            return False
+        return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{1,20}\{[^{}\n]{3,220}\}", flag_text))
+
     fallback = {
-        "verdict": "pass" if candidate_flag and "{" in candidate_flag and "}" in candidate_flag else "fail",
+        "verdict": "pass" if _looks_like_flag_local(candidate_flag) else "fail",
         "confidence": 0.55,
         "reason": "secondary-fallback"
     }
@@ -648,10 +770,12 @@ def _reproducibility_check(candidate_flag: str, evidence_log: list[dict], solve_
     text_window = "\n".join(solve_log[-12:])
     in_reasoning = candidate_flag in text_window if candidate_flag else False
     evidence_hits = 0
+    proof_steps: list[str] = []
     for rec in (evidence_log or [])[-80:]:
         out = str(rec.get("output", ""))
         if candidate_flag and candidate_flag in out:
             evidence_hits += 1
+            proof_steps.append(f"tool={str(rec.get('tool', 'unknown'))} produced flag substring")
     pass_ok = in_reasoning or evidence_hits > 0
     conf = 0.72 if evidence_hits >= 2 else (0.62 if pass_ok else 0.20)
     return {
@@ -659,6 +783,7 @@ def _reproducibility_check(candidate_flag: str, evidence_log: list[dict], solve_
         "confidence": conf,
         "reason": f"reasoning_hit={in_reasoning} evidence_hits={evidence_hits}",
         "evidence_hits": evidence_hits,
+        "proof_steps": proof_steps[:20],
     }
 
 
@@ -817,7 +942,7 @@ def _persist_evidence_record(workspace: str, record: dict) -> str:
 
 def _run_self_healing_preflight(category: str) -> dict:
     cat = (category or "").lower()
-    required = ["python", "strings"]
+    required = ["python3", "strings"]
     if "web" in cat:
         required.extend(["curl"])
     if "binary" in cat or "pwn" in cat or "reverse" in cat:
@@ -1630,8 +1755,7 @@ def _run_solve_impl(payload):
         result("failed")
         return
 
-    challenge_payload = payload.get("challenge", {})
-    challenge = challenge_payload if isinstance(challenge_payload, dict) else {}
+    challenge = _normalize_challenge_payload(payload)
     api_key = str(payload.get("api_key", "") or "")
     user_model = str(payload.get("model", "claude-sonnet-4-6") or "claude-sonnet-4-6")
     platform_payload = payload.get("platform", {})
@@ -1648,11 +1772,10 @@ def _run_solve_impl(payload):
     }
     allocator_cfg = {
         "enabled": bool(extra.get("adaptiveAllocator", True)),
-        "queue_expected_value": float(extra.get("queueExpectedValue", 0.0) or 0.0),
+        "queue_expected_value": _coerce_float(extra.get("queueExpectedValue", 0.0), 0.0),
     }
 
     _PLATFORM_CONFIG = {**pc,"challenge_id":challenge.get("platform_id","")}
-    os.environ["ANTHROPIC_API_KEY"] = api_key  # make available to sub-agents
 
     if not api_key: log("err","No API key","red"); result("failed"); return
     try: import anthropic
@@ -1660,17 +1783,17 @@ def _run_solve_impl(payload):
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    name    = challenge.get("name","Unknown")
+    name    = _coerce_text(challenge.get("name", challenge.get("title", "Unknown")), "Unknown")
     challenge_id = challenge.get("id", "")
     platform_challenge_id = str(challenge.get("platform_id", "") or "")
-    cat     = challenge.get("category","Unknown")
-    diff    = challenge.get("difficulty","medium")
-    pts     = challenge.get("points",0)
-    desc    = challenge.get("description","(no description)")
-    files   = challenge.get("files","")
-    inst    = challenge.get("instance","")
-    ffmt    = challenge.get("flagFormat") or challenge.get("flag_format","")
-    ws      = challenge.get("workspace","")
+    cat     = _coerce_text(challenge.get("category", "Unknown"), "Unknown")
+    diff    = _coerce_text(challenge.get("difficulty", "medium"), "medium")
+    pts     = _coerce_int(challenge.get("points", 0), 0)
+    desc    = _coerce_text(challenge.get("description", "(no description)"), "(no description)")
+    files   = _coerce_text(challenge.get("files", ""), "")
+    inst    = _coerce_text(challenge.get("instance", ""), "")
+    ffmt    = _coerce_text(challenge.get("flagFormat") or challenge.get("flag_format", ""), "")
+    ws      = _coerce_text(challenge.get("workspace", ""), "")
     signal_pack = _build_challenge_signal_pack(challenge, extra)
     explicit_hints = signal_pack.get("explicit_hints", [])
     name_hints = signal_pack.get("name_hints", [])
@@ -1684,13 +1807,13 @@ def _run_solve_impl(payload):
     )
 
     live_sync_enabled = bool(extra.get("liveTeamSync", True))
-    live_sync_poll_seconds = float(extra.get("liveTeamSyncPollSeconds", 12.0) or 12.0)
-    live_sync_poll_iter = int(extra.get("liveTeamSyncPollIters", 1) or 1)
+    live_sync_poll_seconds = _coerce_float(extra.get("liveTeamSyncPollSeconds", 12.0), 12.0)
+    live_sync_poll_iter = max(1, _coerce_int(extra.get("liveTeamSyncPollIters", 1), 1))
     last_live_sync_ts = 0.0
-    baseline_solve_count = int(challenge.get("solve_count", challenge.get("solves", 0)) or 0)
+    baseline_solve_count = _coerce_int(challenge.get("solve_count", challenge.get("solves", 0)), 0)
 
     # ── Score-guided iteration budget ────────────────────────────────────────
-    budget_override = int(payload.get("max_iterations",0))
+    budget_override = _coerce_int(payload.get("max_iterations", 0), 0)
     if budget_override > 0:
         max_iterations = budget_override
     else:
@@ -1719,7 +1842,7 @@ def _run_solve_impl(payload):
     if credit_guard.get("enabled", False) and credit_guard.get("conservative", False):
         max_iterations = min(max_iterations, int(credit_guard.get("conservative_cap_iters", max_iterations)))
     max_tokens_default = 1800 if credit_guard.get("conservative", False) else 4096
-    max_tokens = int(extra.get("maxTokens", max_tokens_default))
+    max_tokens = max(256, _coerce_int(extra.get("maxTokens", max_tokens_default), max_tokens_default))
 
     # Enabled tools filter via registry
     registry = build_tool_registry(TOOLS, TOOL_MAP)
@@ -3249,6 +3372,8 @@ def _run_solve_impl(payload):
                 f"[CRITIC ANALYSIS after {fruitless} fruitless iterations]\n{critic_out}\n\n"
                 "Act on the PIVOT recommendations above. Do NOT continue your previous approach."})
             fruitless = 0  # reset after critic fires
+            critic_fired = True
+            solve_state.fruitless = fruitless
 
         # ── Live exploit reflection tick (local closed-loop) ─────────────────
         if _autonomous_exploit_loop_live and any(k in cat.lower() for k in ["binary", "pwn", "reverse"]) and fruitless >= 4:
@@ -3417,7 +3542,6 @@ def _run_solve_impl(payload):
         except anthropic.AuthenticationError:
             log("err","Auth failed — check API key","red"); result("failed"); return
         except anthropic.RateLimitError as e:
-            random = __import__("random")
             resp = None
             for attempt in range(3):
                 wait = min(120, (2 ** attempt) * 15 + random.uniform(0, 5))
@@ -3477,6 +3601,7 @@ def _run_solve_impl(payload):
         has_tool = False
         tool_results = []
         made_progress = False
+        critic_fired = False
 
         ordered_content = list(resp.content)
         tool_candidates = []
@@ -3832,8 +3957,9 @@ def _run_solve_impl(payload):
         elif not found_flag:
             solve_state.iteration = iteration
             solve_state.fruitless = fruitless
-            solve_state.touch_no_progress()
-            fruitless = solve_state.fruitless
+            if not critic_fired:
+                solve_state.touch_no_progress()
+                fruitless = solve_state.fruitless
 
         if thinking_tracker and planned_model == _MODEL_OPUS and planned_use_thinking:
             try:
@@ -4178,9 +4304,19 @@ def run_solve(payload):
             _safe_fail(payload, f"Runtime init failed: cannot load core orchestrator ({e})")
             return
 
+    prev_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    current_api_key = str(payload.get("api_key", "") or "") if isinstance(payload, dict) else ""
+    if current_api_key:
+        os.environ["ANTHROPIC_API_KEY"] = current_api_key
+
     try:
         return orchestrator.run_solve(payload, _run_solve_impl)
     except Exception as e:
         _safe_fail(payload, f"Solve pipeline crashed: {e}")
         return
+    finally:
+        if prev_api_key is None:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+        else:
+            os.environ["ANTHROPIC_API_KEY"] = prev_api_key
 

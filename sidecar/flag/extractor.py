@@ -15,8 +15,21 @@ def _log_fallback(tag: str, msg: str, cls: str = ""):
     _emit_fallback("log", tag=str(tag), msg=str(msg), cls=str(cls))
 
 
-emit = globals().get("emit") if callable(globals().get("emit")) else _emit_fallback
-log = globals().get("log") if callable(globals().get("log")) else _log_fallback
+def emit(event_type: str, **kwargs):
+    fn = globals().get("emit")
+    if callable(fn) and fn is not emit:
+        return fn(event_type, **kwargs)
+    return _emit_fallback(event_type, **kwargs)
+
+
+def log(tag: str, msg: str, cls: str = ""):
+    fn = globals().get("log")
+    if callable(fn) and fn is not log:
+        return fn(tag, msg, cls)
+    return _log_fallback(tag, msg, cls)
+
+
+_session_formats: dict[str, dict] = {}
 
 
 def _normalize_ctf_key(name: str) -> str:
@@ -67,9 +80,13 @@ def _scan_description_for_format(description: str) -> dict | None:
     if flag_literal:
         prefix = flag_literal.group(1)
         # Filter out common false positives (code snippets, html, etc.)
-        blacklist = {'http', 'https', 'function', 'class', 'struct', 'dict', 'list', 'set',
-                     'import', 'return', 'print', 'main', 'void', 'int', 'char', 'bool',
-                     'string', 'array', 'object', 'error', 'while', 'for', 'if', 'else'}
+        blacklist = {
+            'http', 'https', 'function', 'class', 'struct', 'dict', 'list', 'set',
+            'import', 'return', 'print', 'main', 'void', 'int', 'char', 'bool',
+            'string', 'array', 'object', 'error', 'while', 'for', 'if', 'else',
+            'true', 'false', 'null', 'new', 'this', 'self', 'var', 'let', 'const',
+            'def', 'async', 'await'
+        }
         if prefix.lower() not in blacklist and len(prefix) <= 12:
             return {
                 "prefix": prefix,

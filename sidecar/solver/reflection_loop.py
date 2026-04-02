@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from typing import Any
 
@@ -61,7 +62,7 @@ def _execute_python(script: str, timeout_s: int = 12) -> tuple[int, str]:
         path = f.name
     try:
         proc = subprocess.run(
-            ["python", path],
+            [sys.executable, path],
             capture_output=True,
             text=True,
             timeout=max(1, int(timeout_s)),

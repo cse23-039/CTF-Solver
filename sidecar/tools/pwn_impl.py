@@ -1,6 +1,6 @@
 """Binary exploitation and pwn tools."""
 from __future__ import annotations
-import re, subprocess, struct, os, shutil
+import re, subprocess, struct, os, shutil, tempfile
 import shlex
 import json
 from tools.shell import _shell, _w2l, IS_WINDOWS, USE_WSL, tool_execute_python
@@ -34,8 +34,17 @@ def tool_binary_analysis(path, operation, args=None):
         return _shell(f"strings {sp_q} | grep 'GNU C Library'; ldd {sp_q} 2>/dev/null")
     if operation == "gdb_run":
         script = args or "run\nbt\ninfo registers\nq"
-        with open("/tmp/gdb_script.txt","w") as f: f.write(script)
-        return _shell(f"gdb -batch -x /tmp/gdb_script.txt '{sp}' 2>&1 | head -80", timeout=30)
+        # Use a unique temp file to avoid races when multiple solvers run concurrently.
+        fd, tmp_script = tempfile.mkstemp(prefix="gdb_script_", suffix=".txt")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(script)
+            return _shell(f"gdb -batch -x {shlex.quote(tmp_script)} '{sp}' 2>&1 | head -80", timeout=30)
+        finally:
+            try:
+                os.unlink(tmp_script)
+            except Exception:
+                pass
     if operation == "pwndbg_cyclic":
         length = int(args or 200)
         return tool_execute_python(f"""
@@ -357,10 +366,10 @@ def tool_heap_analysis(binary_path: str, operation: str, args: str = "") -> str:
     if operation == "chunks":
         return _shell(f"gdb -batch -ex 'file {sp}' -ex 'run </dev/null' -ex 'heap chunks' 2>&1 | head -100", timeout=20)
     if operation == "tcache_key":
-        return tool_execute_python(f"""from pwn import *\ne=ELF(\'{binary_path}\',checksec=False)\nprint(f\"arch={{e.arch}} pie={{e.pie}}\")\nprint(\"safe-link (>=2.32): fd_stored = target XOR (heap_base>>12)\")""")
+        return tool_execute_python(f"""from pwn import *\ne=ELF({repr(binary_path)},checksec=False)\nprint(f\"arch={{e.arch}} pie={{e.pie}}\")\nprint(\"safe-link (>=2.32): fd_stored = target XOR (heap_base>>12)\")""")
     if operation == "safe_link_decode":
         enc = args.strip()
-        return tool_execute_python(f"enc=int(\'{enc}\',16) if \'{enc}\'.startswith(\'0x\') else int(\'{enc}\')\nfor sh in range(12,25):\n    print(f\'shift={{sh}}: {{hex(enc^(enc>>sh))}}\')")
+        return tool_execute_python(f"enc=int({repr(enc)},16) if {repr(enc)}.startswith('0x') else int({repr(enc)})\nfor sh in range(12,25):\n    print(f\'shift={{sh}}: {{hex(enc^(enc>>sh))}}\')")
     if operation == "arena":
         return _shell(f"gdb -batch -ex 'file {sp}' -ex 'run </dev/null' -ex 'p main_arena' 2>&1 | head -60", timeout=20)
     return "Available: bins, chunks, tcache_key, safe_link_decode, arena"
@@ -405,15 +414,15 @@ def tool_ret2dlresolve(binary_path: str, target_func: str = "system", arg: str =
     """ret2dlresolve: compute structure offsets and generate pwntools skeleton."""
     code = f"""from pwn import *
 try:
-    elf=ELF(\'{binary_path}\',checksec=False); context.binary=elf
+    elf=ELF({repr(binary_path)},checksec=False); context.binary=elf
     r=ROP(elf)
-    dl=Ret2dlresolvePayload(elf,symbol=\'{target_func}\',args=[b\'{arg}\'])
+    dl=Ret2dlresolvePayload(elf,symbol={repr(target_func)},args=[{repr(arg)}])
     print(f"resolve_call: {{hex(dl.resolv_addr)}}")
     print(f"payload len: {{len(dl.payload)}}")
     print("\nUsage:\n  r.ret2dlresolve(dl)\n  payload=flat({{offset:r.chain()}})+dl.payload")
 except Exception as e:
     print(f"{{e}}")
-    print(_shell(f"readelf -d \'{binary_path}\' | grep -E STRTAB|SYMTAB|JMPREL"))"""
+    print(_shell(f"readelf -d {repr(binary_path)} | grep -E STRTAB|SYMTAB|JMPREL"))"""
     return tool_execute_python(code)
 
 
@@ -423,7 +432,7 @@ def tool_srop(binary_path: str, operation: str = "frame", **params) -> str:
     if operation == "frame":
         arch = params.get("arch","amd64")
         code = f"""from pwn import *
-context.arch=\'{arch}\'
+context.arch={repr(arch)}
 f=SigreturnFrame()
 print(f"Frame size: {{len(bytes(f))}} bytes")
 print("Set: f.rax=constants.SYS_execve, f.rdi=bin_sh, f.rip=syscall_addr")
@@ -463,12 +472,9 @@ def tool_patchelf(binary_path: str, libc_path: str = "", ld_path: str = "",
             _shell(f"patchelf --set-rpath $(dirname '{libc_path}') '{sp}'")
         return _shell(f"ldd '{sp}' 2>/dev/null") + "\nPatched — local binary now uses specified libc."
     if operation == "download_libc":
+        _lp_r = repr(libc_path)
         return tool_execute_python(f"""import requests,os
-r=requests.get(f'https://libc.rip/download/{libc_path}',stream=True,timeout=30); r.raise_for_status()
-fname=f'/tmp/{libc_path}.so'
-with open(fname,'wb') as f:
-    [f.write(c) for c in r.iter_content(8192)]
-os.chmod(fname,0o755); print(f'Downloaded: {fname}')""")
+_lp={_lp_r}\nr=requests.get('https://libc.rip/download/'+_lp,stream=True,timeout=30); r.raise_for_status()\nfname='/tmp/'+_lp+'.so'\nwith open(fname,'wb') as fh:\n    [fh.write(c) for c in r.iter_content(8192)]\nos.chmod(fname,0o755); print('Downloaded: '+fname)""")
     return "Available: info, patch, download_libc"
 
 
@@ -490,10 +496,10 @@ def tool_deobfuscate(binary_path: str, operation: str = "detect", **params) -> s
         code = f"""try:
     from miasm.analysis.binary import Container
     from miasm.analysis.machine import Machine
-    cont=Container.from_stream(open(\'{binary_path}\',\'rb\'))
+    cont=Container.from_stream(open({repr(binary_path)},'rb'))
     machine=Machine(cont.arch)
     mdis=machine.dis_engine(cont.bin_stream)
-    addr=int(\'{func}\',16) if \'{func}\' else cont.entry_point
+    addr=int({repr(func)},16) if {repr(func)} else cont.entry_point
     asmcfg=mdis.dis_multiblock(addr)
     print(f\'Blocks: {{len(list(asmcfg.blocks))}}')
     for blk in list(asmcfg.blocks)[:8]:
@@ -510,7 +516,7 @@ def tool_triton_taint(binary_path: str, stdin_input: str = "", operation: str = 
         empty_repr = repr(b"")
         code = (f"""try:\n    from triton import *\n    ctx=TritonContext(ARCH.X86_64)\n"""
                 f"""    ctx.setMode(MODE.ALIGNED_MEMORY,True)\n"""
-                f"""    import lief; binary=lief.parse('{binary_path}')\n"""
+                f"""    import lief; binary=lief.parse({repr(binary_path)})\n"""
                 f"""    for seg in binary.segments:\n"""
                 f"""        if seg.virtual_address: ctx.setConcreteMemoryAreaValue(seg.virtual_address,list(seg.content))\n"""
                 f"""    stdin_bytes={stdin_bytes_repr}\n"""
@@ -519,13 +525,13 @@ def tool_triton_taint(binary_path: str, stdin_input: str = "", operation: str = 
                 f"""except ImportError:\n"""
                 f"""    print('Triton not installed: pip install triton')\n"""
                 f"""    import subprocess\n"""
-                f"""    r=subprocess.run(['ltrace','-e','strcmp+memcmp+strncmp','{binary_path}'],"""
+                f"""    r=subprocess.run(['ltrace','-e','strcmp+memcmp+strncmp',{repr(binary_path)}],"""
                 f"""input={empty_repr},capture_output=True,timeout=10)\n"""
                 f"""    print(r.stderr.decode(errors='replace')[:2000])""")
         return tool_execute_python(code, timeout=30)
     if operation == "strace":
-        inp = repr(stdin_input.encode() if stdin_input else b"")
-        return _shell(f"strace -e read,write,open,openat,execve -s 200 '{binary_path}' <<< '{stdin_input}' 2>&1 | head -50", timeout=15)
+        sq_inp = shlex.quote(stdin_input or "")
+        return _shell(f"strace -e read,write,open,openat,execve -s 200 '{sp}' <<< {sq_inp} 2>&1 | head -50", timeout=15)
     return "Available: trace, strace"
 
 
@@ -642,7 +648,7 @@ try:
 
 except ImportError:
     print("pwntools not available for ARM ROP")
-    print(f"Manual approach: ROPgadget --binary '{sp}' --arch {arch}")
+    print(f"Manual approach: ROPgadget --binary {repr(sp)} --arch {repr(arch.lower())}")
 except Exception as ex:
     import traceback; traceback.print_exc()
 """

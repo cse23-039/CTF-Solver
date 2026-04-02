@@ -39,11 +39,10 @@ class TokenizationCache:
         with self._lock:
             if key in self._cache:
                 return self._cache[key]
-        val = int(estimator(messages, system))
-        with self._lock:
+            val = int(estimator(messages, system))
             if len(self._cache) >= self._max_size:
                 oldest_key = next(iter(self._cache), None)
                 if oldest_key is not None:
                     self._cache.pop(oldest_key, None)
             self._cache[key] = val
-        return val
+            return val

@@ -4,7 +4,11 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
+
+
+_MEMORY_WRITE_LOCK = threading.Lock()
 
 
 def _prune_jsonl(path: str, max_lines: int, max_bytes: int) -> int:
@@ -64,9 +68,10 @@ def store_memory_v2(record: dict) -> None:
             record["memory_type"] = "episodic"
         else:
             record["memory_type"] = "semantic"
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    _prune_jsonl(path, max_lines=180000, max_bytes=256 * 1024 * 1024)
+    with _MEMORY_WRITE_LOCK:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        _prune_jsonl(path, max_lines=180000, max_bytes=256 * 1024 * 1024)
 
 
 def memory_trust_score(rec: dict, ctf_name: str = "", category: str = "", query_fingerprint: str = "") -> float:

@@ -215,9 +215,13 @@ function loadSettings() {
   try {
     const s = localStorage.getItem('ctf-solver-v2');
     if (s) settings = Object.assign(deepClone(DEFAULTS), JSON.parse(s));
-    const sessionKey = sessionStorage.getItem('ctf-solver-session-apikey');
-    if (typeof sessionKey === 'string' && sessionKey.trim()) {
-      settings.apiKey = sessionKey.trim();
+    // API key: localStorage persists across app restarts; sessionStorage is fallback
+    const lsKey = localStorage.getItem('ctf-solver-apikey');
+    const ssKey = sessionStorage.getItem('ctf-solver-session-apikey');
+    if (lsKey && lsKey.trim()) {
+      settings.apiKey = lsKey.trim();
+    } else if (ssKey && ssKey.trim()) {
+      settings.apiKey = ssKey.trim();
     }
     const legacyBg = (settings.colBg || '').toLowerCase() === '#040404';
     const legacyAcc = (settings.colAccent || '').toLowerCase() === '#e8e8e8';
@@ -234,10 +238,25 @@ function persistSettings() {
   persisted.apiKey = '';
   localStorage.setItem('ctf-solver-v2', JSON.stringify(persisted));
   if (settings.apiKey) {
+    localStorage.setItem('ctf-solver-apikey', settings.apiKey);
     sessionStorage.setItem('ctf-solver-session-apikey', settings.apiKey);
   } else {
+    localStorage.removeItem('ctf-solver-apikey');
     sessionStorage.removeItem('ctf-solver-session-apikey');
   }
+}
+
+function loadChallenges() {
+  try {
+    const s = localStorage.getItem('ctf-solver-challenges-v1');
+    if (s) { const p = JSON.parse(s); if (Array.isArray(p)) challenges = p; }
+  } catch(_) {}
+}
+
+function persistChallenges() {
+  try {
+    localStorage.setItem('ctf-solver-challenges-v1', JSON.stringify(challenges));
+  } catch(_) {}
 }
 
 // ─── Apply settings → DOM + CSS ──────────────────────────────────────────────
@@ -340,7 +359,7 @@ function addLog(tag, msg, cls='') {
 
 // ─── Challenge management ─────────────────────────────────────────────────────
 function addChallenge(c) {
-  challenges.push(c); renderList(); updateStats();
+  challenges.push(c); renderList(); updateStats(); persistChallenges();
 }
 
 function sortedChallenges() {
@@ -409,7 +428,7 @@ function renderDetails() {
     <div class="det-row"><span class="det-key">name</span><span class="det-val v-white">${esc(c.name)}</span></div>
     <div class="det-row"><span class="det-key">category</span><span class="det-val">${esc(c.category)}</span></div>
     <div class="det-row"><span class="det-key">difficulty</span><span class="det-val">${esc(c.difficulty)}</span></div>
-    <div class="det-row"><span class="det-key">points</span><span class="det-val">${c.points}</span></div>
+    ${c.points>0?`<div class="det-row"><span class="det-key">points</span><span class="det-val">${c.points}</span></div>`:''}
     <div class="det-row"><span class="det-key">status</span><span class="det-val ${sCls}">${c.status.toUpperCase()}${c.status==='solving'?' <span class="spin">◌</span>':''}</span></div>
     ${runtimeRow}${modelRow}${iterRow}
     ${c.platform_id?`<div class="det-row"><span class="det-key">platform id</span><span class="det-val v-mid">${esc(c.platform_id)}</span></div>`:''}
@@ -509,6 +528,11 @@ let _currentIter     = 0;
 let _currentModel    = '';
 let _currentThinking = false;
 
+// ─── Session credit tracking ─────────────────────────────────────────────────
+let _sessionCost    = 0.0;
+let _sessionCalls   = 0;
+let _creditLowAlert = false;
+
 function _startRuntimeTimer(c) {
   _solveStartTime = Date.now();
   _currentIter    = 0;
@@ -534,6 +558,18 @@ function _stopRuntimeTimer(elapsed) {
   if (rt && elapsed) rt.textContent = `${Math.floor(elapsed/3600).toString().padStart(2,'0')}:${Math.floor((elapsed%3600)/60).toString().padStart(2,'0')}:${(elapsed%60).toString().padStart(2,'0')}`;
 }
 
+function updateCreditDisplay() {
+  const el = g('pb-credit');
+  if (!el) return;
+  if (_sessionCost < 0.0001) {
+    el.textContent = '$0.000'; el.className = 'pb-val'; el.title = 'No API spend yet';
+    return;
+  }
+  el.textContent = `$${_sessionCost.toFixed(3)}`;
+  el.className   = 'pb-val credit-spent' + (_creditLowAlert ? ' credit-low' : '');
+  el.title       = `Session spend: $${_sessionCost.toFixed(5)} | ${_sessionCalls} API call${_sessionCalls === 1 ? '' : 's'}`;
+}
+
 async function solveCh(c) {
   if (!settings.apiKey)    { addLog('err','No API key — open Settings → API & Engine','red'); return; }
   if (!settings.solverPath){ addLog('err','No solver path — open Settings → Python & Tools','red'); return; }
@@ -541,6 +577,9 @@ async function solveCh(c) {
   c.status='solving'; c.flag=null; c.runtime=null; c.solveModel=null; c.solveIter=null;
   renderList(); if(selectedId===c.id) renderDetails(); updateStats();
   document.getElementById('solving-indicator').style.display='';
+
+  // Reset live credit alert per-solve (session cost accumulates)
+  _creditLowAlert = false;
 
   // Reset live indicators
   const fmtEl=g('pb-flagfmt');
@@ -591,6 +630,7 @@ async function solveCh(c) {
     c.status==='solved'?'white':c.status==='failed'?'red':'');
   document.getElementById('solving-indicator').style.display='none';
   renderList(); if(selectedId===c.id) renderDetails(); updateStats();
+  persistChallenges();
 }
 
 // ─── Settings tab switching ───────────────────────────────────────────────────
@@ -652,7 +692,7 @@ const App = {
     const name=gv('qa-name').trim(), cat=gv('qa-cat');
     if (!name) return;
     const c={id:uid(),name,category:cat,description:'',files:'',instance:'',
-             flagFormat:'',points:100,difficulty:'medium',
+             flagFormat:'',points:0,difficulty:'medium',
              status:'staged',flag:null,workspace:'',platform_id:'',createdAt:Date.now()};
     addChallenge(c);
     g('qa-name').value='';
@@ -670,10 +710,20 @@ const App = {
   closeModal() {
     g('modal-overlay').classList.remove('open');
     ['m-name','m-desc','m-files','m-inst','m-fmt'].forEach(id=>sv(id,''));
-    sv('m-pts','100');
     if (g('m-files-input')) g('m-files-input').value = '';
-    g('m-files')?.classList.remove('is-drop');
+    g('m-dropzone')?.classList.remove('dz-active');
+    sv('m-diff','medium');
   },
+  onDropzoneEnter(e) { e.preventDefault(); e.stopPropagation(); g('m-dropzone')?.classList.add('dz-active'); },
+  onDropzoneOver(e)  { e.preventDefault(); e.stopPropagation(); g('m-dropzone')?.classList.add('dz-active'); },
+  onDropzoneLeave(e) { e.preventDefault(); e.stopPropagation(); g('m-dropzone')?.classList.remove('dz-active'); },
+  async onDropzoneDrop(e) {
+    e.preventDefault(); e.stopPropagation();
+    g('m-dropzone')?.classList.remove('dz-active');
+    const files = extractDroppedFiles(e);
+    if (files.length) await App.loadSourceFiles(files);
+  },
+
   pickSourceFiles() {
     g('m-files-input')?.click();
   },
@@ -698,7 +748,7 @@ const App = {
     if(!name||!desc){ alert('Name and description are required.'); return; }
     const c={id:uid(),name,category:gv('m-cat'),description:desc,
              files:gv('m-files').trim(),instance:gv('m-inst').trim(),
-             flagFormat:gv('m-fmt').trim(),points:parseInt(gv('m-pts'))||100,
+             flagFormat:gv('m-fmt').trim(),points:0,
              difficulty:gv('m-diff'),status:'staged',flag:null,
              workspace:'',platform_id:'',createdAt:Date.now()};
     addChallenge(c); App.closeModal(); App.select(c.id);
@@ -710,7 +760,7 @@ const App = {
     const c=ch(selectedId); if(!c) return;
     if(c.status==='solving'){ addLog('warn','Cannot remove while solving.'); return; }
     challenges=challenges.filter(x=>x.id!==selectedId);
-    selectedId=null; renderList(); renderDetails(); updateStats();
+    selectedId=null; persistChallenges(); renderList(); renderDetails(); updateStats();
     addLog('sys','Challenge removed.');
   },
 
@@ -809,6 +859,7 @@ const App = {
         });
       });
       renderList(); updateStats();
+      persistChallenges();
     } catch(e){ addLog('err',`Import error: ${e}`,'red'); }
     finally{ g('btn-import').disabled=false; }
   },
@@ -909,7 +960,8 @@ const App = {
     settings.apiKey       = gv('s-apikey').trim();
     settings.model        = gv('s-model');
     settings.modelCustom  = gv('s-model-custom').trim();
-    settings.maxIter      = parseInt(gv('s-maxiter'))||20;
+    const _iterRaw = parseInt(gv('s-maxiter'), 10);
+    settings.maxIter      = isNaN(_iterRaw) ? 0 : Math.max(0, _iterRaw);
     settings.maxTokens    = parseInt(gv('s-maxtokens'))||4096;
     settings.concurrent   = parseInt(gv('s-concurrent'))||1;
     settings.autoSubmit   = gc('s-auto-submit');
@@ -1349,6 +1401,7 @@ const App = {
       });
 
       renderList(); updateStats();
+      persistChallenges();
 
       // Log per-category counts
       const byCat = {};
@@ -1559,6 +1612,214 @@ listen('solver-log', event => {
 
   } else if(e.type==='writeup'&&e.path) {
     addLog('ok',`📝 Writeup: ${e.path}`,'white');
+
+  } else if(e.type==='credit_status') {
+    const delta = parseFloat(e.call_spend_usd || 0);
+    if (delta > 0) { _sessionCost += delta; _sessionCalls++; }
+    updateCreditDisplay();
+    if (e.low && !_creditLowAlert) {
+      _creditLowAlert = true;
+      const cEl = g('pb-credit');
+      if (cEl) cEl.classList.add('credit-low');
+      addLog('warn', `⚠ API budget low — $${(e.remaining_usd||0).toFixed(4)} remaining of $${(e.cap_usd||0).toFixed(2)} cap`, 'red');
+    }
+
+  // ── Engine intelligence / meta events ──────────────────────────────────────
+  } else if(e.type==='result') {
+    // Live result update from stream (flag found / solve completed)
+    const c = ch(selectedId);
+    if (c) {
+      if (e.status) c.status = e.status;
+      if (e.flag)   c.flag   = e.flag;
+      renderList(); renderDetails(); updateStats();
+    }
+    if (e.flag) addLog('ok', `FLAG: ${e.flag}`, 'white');
+
+  } else if(e.type==='solve_cancelled') {
+    addLog('warn', `Solve cancelled — ${e.reason||'user request'}${e.branch?' (branch '+e.branch+')':''}`, 'red');
+    const c = ch(selectedId);
+    if (c && c.status==='solving') { c.status='failed'; renderList(); renderDetails(); updateStats(); }
+
+  } else if(e.type==='benchmark_summary') {
+    if (e.error) {
+      addLog('warn', `[BENCH] ${e.error}`, 'dim');
+    } else {
+      addLog('sys', `[BENCH] ${e.total||0} challenges | solved ${e.solved||0} | avg ${(e.avg_iters||0).toFixed(1)} iters | ${(e.solve_rate||0)*100|0}% rate`, 'dim');
+    }
+
+  } else if(e.type==='benchmark_gate') {
+    const pass = e.pass ?? e.passed;
+    addLog(pass ? 'sys' : 'warn', `[GATE] Benchmark ${pass?'passed':'FAILED'} — ${(e.reasons||[]).join('; ')||''}`, pass ? 'dim' : 'red');
+
+  } else if(e.type==='planner_node') {
+    addLog('sys', `[PLAN] node=${e.node||'?'} tool=${e.tool||'?'} ok=${e.success}`, 'dim');
+
+  } else if(e.type==='planner') {
+    const specs = (e.specialists||[]).join(', ');
+    addLog('sys', `[PLAN] ${e.hypothesis_count||0} hypotheses | specialists: ${specs||'general'}`, 'dim');
+
+  } else if(e.type==='planner_ev') {
+    const top = (e.top||[]).map(h => `${h.tactic||h.name||'?'}(${(h.ev||0).toFixed(2)})`).join(' ');
+    addLog('sys', `[PLAN-EV] top: ${top||'—'}`, 'dim');
+
+  } else if(e.type==='import_queue') {
+    addLog('sys', `[QUEUE] ${e.queue_count||0} challenges queued for auto-solve — ${e.ctf_name||''}`, 'dim');
+
+  } else if(e.type==='import_watch') {
+    if (e.error) addLog('warn', `[WATCH] cycle ${e.cycle}: ${e.error}`, 'red');
+    else         addLog('sys',  `[WATCH] cycle ${e.cycle} — ${e.status||'ok'}`, 'dim');
+
+  } else if(e.type==='auto_solve_start') {
+    addLog('sys', `[AUTO] Starting: ${e.challenge||'?'} (rank ${e.rank||0} EV ${(e.expected_value||0).toFixed(2)})`, '');
+
+  } else if(e.type==='auto_solve_batch') {
+    addLog('sys', `[AUTO] Batch: started ${e.started||0}/${e.requested||0} solves — ${e.ctf_name||''}`, 'dim');
+
+  } else if(e.type==='mpc_budget') {
+    addLog('sys', `[MPC] ${e.branches||1} branches allocated — budget/branch: ${e.per_branch||'?'}`, 'dim');
+
+  } else if(e.type==='human_loop') {
+    addLog('warn', `[MODE] ${e.action==='force_local_only'?'Local-only mode — network tools disabled':'Human loop: '+e.action} (${e.active_tools||0} tools active)`, '');
+
+  } else if(e.type==='transfer_learning') {
+    addLog('sys', `[XFER] ${e.tactic_count||0} tactics from family=${e.family||'?'}`, 'dim');
+
+  } else if(e.type==='hypothesis_lifecycle') {
+    const summary = (e.summary||[]).slice(0,3).map(h=>`${h.id||'?'}(${h.status||'?'})`).join(' ');
+    addLog('sys', `[HYP] ${summary||'—'}`, 'dim');
+
+  } else if(e.type==='hypothesis_kill') {
+    const killed = (e.killed||[]).slice(0,3).map(h=>`${h.id||'?'}`).join(',');
+    addLog('sys', `[HYP] killed: ${killed||'—'} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='belief_graph') {
+    addLog('sys', `[BELIEF] ${e.event||''} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='exploit_chain') {
+    addLog('sys', `[CHAIN] edge=${JSON.stringify(e.edge||{})} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='exploit_dev') {
+    addLog('sys', `[EXPLOIT] ${e.loops||0} loops | artifacts: ${(e.artifacts||[]).join(',')||'—'}`, 'dim');
+
+  } else if(e.type==='lab_bootstrap') {
+    addLog('sys', `[LAB] workspace=${e.workspace||'?'} artifacts: ${(e.artifacts||[]).length}`, '');
+
+  } else if(e.type==='branch_budget') {
+    const alloc = (e.allocated||[]).slice(0,3).map(b=>`br${b.branch||'?'}(${b.budget||0})`).join(' ');
+    addLog('sys', `[BRANCH] ${alloc||'—'}`, 'dim');
+
+  } else if(e.type==='branch_synthesis') {
+    const top = (e.ranked||[]).slice(0,2).map(b=>`br${b.branch||'?'}(${(b.score||0).toFixed(2)})`).join(' ');
+    addLog('sys', `[SYNTH] ranked: ${top||'—'}`, 'dim');
+
+  } else if(e.type==='checkpoint') {
+    addLog('sys', `[CKPT] ${e.action||'saved'} @iter ${e.iteration||0} — ${e.challenge||''}`, 'dim');
+
+  } else if(e.type==='critic_step') {
+    addLog('sys', `[CRITIC] verdict=${e.verdict||'?'} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='critic_checkpoint') {
+    addLog('sys', `[CRITIC] checkpoint planned @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='critic_hard_block') {
+    addLog('warn', `[CRITIC] tool blocked: ${e.blocked_tool||e.reason||'?'} until iter ${e.until_iter||0}`, 'red');
+
+  } else if(e.type==='thinking_budget') {
+    addLog('sys', `[THINK] ${e.tokens||0} tokens | route_score=${(e.route_score||0).toFixed(2)} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='thinking_calibration') {
+    addLog('sys', `[THINK] ${e.action||'?'} ${e.from_tokens||0}→${e.to_tokens||0} (${e.reason||''}) @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='thinking_efficiency') {
+    const eff = e.vector || {};
+    addLog('sys', `[THINK-EFF] @iter ${e.iteration||0} novel=${eff.novel_actions||0} repeat=${eff.repeated_actions||0}`, 'dim');
+
+  } else if(e.type==='council') {
+    addLog('sys', `[COUNCIL] action=${e.action||'?'} veto=${e.veto} throttle=${e.throttle} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='self_play_debate') {
+    addLog('sys', `[DEBATE] confidence=${(e.confidence||0).toFixed(2)} winning=${e.winning||'?'} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='haiku_commentary') {
+    addLog('info', `[NOTE] ${e.note||''}`, '');
+
+  } else if(e.type==='deception_guard') {
+    if (e.suspicious) addLog('warn', `[GUARD] Deception risk=${e.risk||0} flags: ${(e.flags||[]).join(', ')}`, 'red');
+    else              addLog('sys',  `[GUARD] deception_risk=${e.risk||0}`, 'dim');
+
+  } else if(e.type==='credit_guard') {
+    addLog('warn', `[CREDIT] ${e.action||'?'} — ${e.reason||''}`, e.action?.includes('disabled')?'red':'');
+
+  } else if(e.type==='control_plane') {
+    addLog('sys', `[CTRL] tuned=${e.tuned} canary=${e.canary_applied} cohort=${e.cohort||'?'}`, 'dim');
+
+  } else if(e.type==='difficulty_recalibration') {
+    addLog('sys', `[DIFF] ${e.previous||'?'} → ${e.corrected||'?'} (${e.correction>=0?'+':''}${(e.correction||0).toFixed(3)}) [${e.category||'?'}]`, 'dim');
+
+  } else if(e.type==='difficulty_reestimate') {
+    addLog('sys', `[DIFF-EST] @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='policy_retrain') {
+    addLog('sys', `[POLICY] retrain: ${e.status||'?'} (${e.reason||''})`, 'dim');
+
+  } else if(e.type==='policy_reject') {
+    addLog('warn', `[POLICY] rejected: ${e.reason||'?'}`, '');
+
+  } else if(e.type==='policy_rollback') {
+    addLog('warn', `[POLICY] rollback to ${e.restored||'?'} (${e.reason||''})`, '');
+
+  } else if(e.type==='curriculum') {
+    addLog('sys', `[CURR] ${e.event||'?'}: ${e.challenge||'?'} [${e.category||'?'} ${e.difficulty||'?'}]`, 'dim');
+
+  } else if(e.type==='counterfactual_learning') {
+    addLog('sys', `[LEARN] counterfactual deltas @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='tool_dedup') {
+    if (e.blocked) addLog('sys', `[DEDUP] ${e.tool||'?'} blocked sim=${(e.similarity||0).toFixed(2)} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='tool_dedup_substitute') {
+    addLog('sys', `[DEDUP] ${e.blocked_tool||'?'} → ${e.substitute_tool||'?'} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='novelty_gate') {
+    if (e.blocked) addLog('sys', `[NOVELTY] ${e.tool||'?'} blocked gain=${(e.score||0).toFixed(2)} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='novelty_substitute') {
+    addLog('sys', `[NOVELTY] ${e.blocked_tool||'?'} → ${e.substitute_tool||'?'} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='slo_controller') {
+    addLog('sys', `[SLO] @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='adaptive_ev') {
+    const best = (e.ranked||[])[0];
+    if (best) addLog('sys', `[EV] top: ${best.tactic||best.name||'?'}(${(best.ev||0).toFixed(2)}) @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='live_writeup_hint') {
+    addLog('info', `[HINT] writeup hint injected @iter ${e.iteration||0} (fruitless=${e.fruitless||0})`, '');
+
+  } else if(e.type==='state_vector') {
+    addLog('sys', `[STATE] @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='graph_policy') {
+    addLog('sys', `[GRAPH] primary=${e.primary||'?'} path=${(e.path||[]).join('→')} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='autoloop') {
+    addLog('sys', `[LOOP] phase=${e.phase||'?'} cycles=${e.cycles||0} @iter ${e.iteration||0}`, 'dim');
+
+  } else if(e.type==='replay_audit') {
+    if (e.error) addLog('warn', `[REPLAY] ${e.error}`, 'red');
+    else         addLog('sys',  `[REPLAY] ${e.rows||0} rows — ${JSON.stringify(e.actions||{})}`, 'dim');
+
+  } else if(e.type==='regression_audit') {
+    if (e.error) addLog('warn', `[REGR] ${e.error}`, 'red');
+    else         addLog('sys',  `[REGR] audit ok`, 'dim');
+
+  } else if(e.type==='offline_eval') {
+    if (e.error) addLog('warn', `[EVAL] ${e.error}`, 'red');
+    else         addLog('sys',  `[EVAL] offline eval ok`, 'dim');
+
+  } else if(e.type==='chaos_harness') {
+    if (e.error) addLog('warn', `[CHAOS] ${e.error}`, 'red');
+    else         addLog('sys',  `[CHAOS] harness ok`, 'dim');
   }
 });
 
@@ -1582,8 +1843,10 @@ g('btn-settings').addEventListener('click', ()=>App.openSettings());
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 (function init() {
+  loadChallenges();
   loadSettings();
   applyAll();
+  updateCreditDisplay();
 
   if(!settings.solverPath) {
     invoke('get_bin_dir').then(dir=>{
@@ -1594,7 +1857,7 @@ g('btn-settings').addEventListener('click', ()=>App.openSettings());
   }
 
   renderList(); renderDetails(); updateStats();
-  addLog('sys','CTF::SOLVER initialized.','bright');
+  addLog('sys','CTF Solver — online, AI-powered ⚡','bright');
   addLog('info',`Engine: ${activeModel()} | Iterations: ${settings.maxIter} | Tools: ${countEnabledTools()}`);
   if(!settings.apiKey)    addLog('warn','⚠ No API key — Settings → API & Engine (console.anthropic.com for key)');
   if(!settings.solverPath)addLog('warn','⚠ Solver script not set — Settings → Python & Tools');
@@ -1613,43 +1876,8 @@ g('btn-settings').addEventListener('click', ()=>App.openSettings());
     addLog('sys', `Restored connection: ${settings.ctfName} (${settings.platform})`, '');
   }
 
-  const modalFiles = g('m-files');
-  if (modalFiles) {
-    const prevent = (e) => { e.preventDefault(); e.stopPropagation(); };
-    ['dragenter', 'dragover'].forEach((evt) => {
-      modalFiles.addEventListener(evt, (e) => {
-        prevent(e);
-        modalFiles.classList.add('is-drop');
-      });
-    });
-    ['dragleave', 'dragend', 'drop'].forEach((evt) => {
-      modalFiles.addEventListener(evt, () => modalFiles.classList.remove('is-drop'));
-    });
-    modalFiles.addEventListener('drop', (e) => {
-      prevent(e);
-      const files = extractDroppedFiles(e);
-      if (files.length) App.loadSourceFiles(files);
-    });
-
-    const modal = g('modal');
-    if (modal) {
-      ['dragenter', 'dragover', 'drop'].forEach((evt) => {
-        modal.addEventListener(evt, prevent);
-      });
-      modal.addEventListener('drop', (e) => {
-        const files = extractDroppedFiles(e);
-        if (files.length) App.loadSourceFiles(files);
-      });
-    }
-
-    ['dragenter', 'dragover', 'drop'].forEach((evt) => {
-      window.addEventListener(evt, (e) => {
-        if (g('modal-overlay')?.classList.contains('open')) {
-          e.preventDefault();
-        }
-      });
-    });
-  }
+  // Dropzone drag-and-drop is fully handled inline via HTML ondragenter/ondragover/ondrop attributes
+  // and m-files-input file picker via App.pickSourceFiles() / App.loadSourceFiles()
 
   const solverInput = g('s-solver');
   if (solverInput) {
